@@ -127,41 +127,42 @@ After regenerating the key, update the `plugins.updater.pubkey` value in `src-ta
 5. Run:
 
 ```powershell
-npm run build
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml
+npm run release:check -- -Version 0.1.1
 ```
 
-6. Review the diff.
-7. Commit release changes.
-8. Push the release branch and open a PR into `main`.
-9. After the PR is merged, create and push an annotated tag from `main`:
+6. For local installer verification, run:
+
+```powershell
+npm run release:check -- -Version 0.1.1 -BuildInstaller
+```
+
+7. Review the diff.
+8. Commit release changes.
+9. Push the release branch and open a PR into `main`.
+10. After the PR is merged, create and push an annotated tag from `main`:
 
 ```powershell
 git checkout main
 git pull
-git tag -a v0.1.1 -m "SparkSpeech 0.1.1"
-git push origin v0.1.1
+npm run release:check -- -Version 0.1.1 -Tag -PushTag
 ```
 
-10. GitHub Actions runs `.github/workflows/release.yml`.
-11. Confirm the GitHub Release includes:
+11. GitHub Actions runs `.github/workflows/release.yml`.
+12. Confirm the GitHub Release includes:
 
 - NSIS installer
 - MSI installer
 - updater artifacts
 - `latest.json`
 
-12. Install the previous production version and use Settings -> About -> Check Update to verify the app sees the new release.
+13. Install the previous production version and use Settings -> About -> Check Update to verify the app sees the new release.
 
 ## Manual Local Release Build
 
 Use this only for local artifact verification:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY=(Get-Content "$env:USERPROFILE\.tauri\sparkspeech-updater.key" -Raw)
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD=(Get-Content "$env:USERPROFILE\.tauri\sparkspeech-updater.key.password.txt" -Raw)
-npm run tauri:build
+npm run release:check -- -Version 0.1.1 -BuildInstaller
 ```
 
 The local build should create installers under `src-tauri\target\release\bundle\`.
