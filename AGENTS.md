@@ -71,29 +71,44 @@ The npm/Tauri command currently still creates MSI and NSIS bundles even when `--
 
 ## Release Process
 
-When preparing a SparkSpeech release:
+When preparing and publishing a SparkSpeech release:
 
 1. Confirm the branch and workspace status. Release work should happen from the matching `dev/x.y.z` branch unless the user explicitly chooses another flow.
 2. Confirm the version number and update every version surface together:
    - `package.json`
    - `package-lock.json`
    - `src-tauri/Cargo.toml`
+   - `src-tauri/Cargo.lock`
    - `src-tauri/tauri.conf.json`
    - `docs/release-x.y.z.md`
 3. Write release notes that describe user-visible behavior and important operational notes, not internal trivia.
-4. Run verification:
+4. Prefer the release script for release verification:
+   - `npm run release:check -- x.y.z`
+   - `npm run release:check -- x.y.z -BuildInstaller` when local signed installer verification is needed.
+5. If not using the script, run verification manually:
    - `npm run build`
    - `cargo check --manifest-path src-tauri/Cargo.toml`
-   - `npm run tauri:build -- --no-bundle`
-5. Confirm release artifacts exist:
+   - `cargo test --manifest-path src-tauri/Cargo.toml`
+   - `npm run tauri:build` with updater signing environment variables available when verifying installer signing locally.
+6. Confirm release artifacts exist after installer verification:
    - `src-tauri/target/release/sparkspeech.exe`
    - `src-tauri/target/release/bundle/nsis/SparkSpeech_x.y.z_x64-setup.exe`
+   - `src-tauri/target/release/bundle/nsis/SparkSpeech_x.y.z_x64-setup.exe.sig`
    - `src-tauri/target/release/bundle/msi/SparkSpeech_x.y.z_x64_en-US.msi`
-6. Review the final diff.
-7. Commit with a Conventional Commits message.
-8. Push the branch and open a pull request into `main`, unless the user explicitly asks for a direct release.
-9. After merge, create an annotated tag such as `v0.1.0`.
-10. Publish the GitHub Release with the release notes and upload the NSIS/MSI installers.
+   - `src-tauri/target/release/bundle/msi/SparkSpeech_x.y.z_x64_en-US.msi.sig`
+7. Review the final diff.
+8. Commit with a Conventional Commits message.
+9. Push the release branch and open a pull request into `main`, unless the user explicitly asks for a direct release.
+10. Do not stop at PR creation when the user asked to publish. Merge the PR into `main` after checks are acceptable.
+11. After merge, switch to `main`, pull, and create an annotated tag such as `v0.1.2`.
+12. Push the tag. The GitHub Actions release workflow builds and publishes the GitHub Release.
+13. Wait for the GitHub Actions release workflow to finish.
+14. Confirm the GitHub Release exists and includes:
+   - NSIS installer
+   - MSI installer
+   - updater `.sig` files
+   - `latest.json`
+15. Report the Release URL, PR URL, tag, and any non-blocking workflow warnings.
 
 ## Safe Verification
 
