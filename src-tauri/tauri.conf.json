@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SparkSpeech",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.leo.sparkspeech",
   "build": {
     "frontendDist": "../dist",
@@ -44,6 +44,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -54,6 +55,17 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQwOEEwMzJEODVCNzYyQjUKUldTMVlyZUZMUU9LME9uaVBJL3JCQUQwenNwUWVzclQ3MDhOSldmUXhIMDV0RG96Z3lQN0RocFIK",
+      "endpoints": [
+        "https://github.com/lanbinleo/SparkSpeech/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

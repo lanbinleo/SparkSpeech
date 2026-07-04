@@ -6,24 +6,30 @@ import {
   Clipboard,
   FileAudio,
   FileText,
+  FolderOpen,
   Home,
   Headphones,
   Keyboard,
   Mic,
+  Monitor,
+  Moon,
   Plus,
+  Play,
   RefreshCw,
   Save,
   Settings,
   SlidersHorizontal,
+  Sun,
   TestTube2,
   Trash2,
   Wand2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { call } from "./tauri";
 import type {
   AppSettings,
@@ -35,6 +41,11 @@ import type {
 } from "./tauri";
 
 type Tab = "home" | "models" | "preferences" | "settings";
+type Toast = {
+  id: number;
+  message: string;
+  tone?: "info" | "error" | "success";
+};
 
 const statusLabel: Record<string, string> = {
   idle: "待命",
@@ -56,6 +67,7 @@ const pageSize = 60;
 export function App() {
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings | null>(null);
   const [prompts, setPrompts] = useState<PromptSettings | null>(null);
   const [records, setRecords] = useState<SpeechRecord[]>([]);
   const [hasMoreRecords, setHasMoreRecords] = useState(false);
@@ -68,22 +80,22 @@ export function App() {
     status: "idle",
     elapsed_ms: 0,
   });
-  const [notice, setNotice] = useState("正在读取本地配置");
+  const [toasts, setToasts] = useState<Toast[]>([]);
 
   useEffect(() => {
     call<BootstrapData>("get_bootstrap")
       .then((data) => {
         setSettings(data.settings);
+        setSettingsDraft(data.settings);
         applyTheme(data.settings.theme);
         setPrompts(data.prompts);
         setRecords(data.records);
         setHasMoreRecords(data.records.length >= pageSize);
         setRecording(data.recording);
-        setNotice("准备就绪");
         setRecordsLoading(false);
       })
       .catch((error) => {
-        setNotice(`读取配置失败：${String(error)}`);
+        showToast(`读取配置失败：${String(error)}`, "error");
         setRecordsLoading(false);
       });
   }, []);
@@ -100,7 +112,7 @@ export function App() {
         mergeRecord(event.payload);
       }),
       listen<string>("shortcut-error", (event) => {
-        setNotice(event.payload);
+        showToast(event.payload, "error");
       }),
     ]);
 
@@ -125,7 +137,7 @@ export function App() {
 
   const selectedTitle = useMemo(() => {
     if (activeTab === "models") return "模型配置";
-    if (activeTab === "preferences") return "Preference";
+    if (activeTab === "preferences") return "偏好";
     if (activeTab === "settings") return "设置";
     return "首页";
   }, [activeTab]);
@@ -139,42 +151,51 @@ export function App() {
   );
   const stats = useMemo(() => buildStats(records), [records]);
 
+  function showToast(message: string, tone: Toast["tone"] = "info") {
+    const id = Date.now() + Math.random();
+    setToasts((current) => [...current, { id, message, tone }]);
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 3200);
+  }
+
   async function toggleRecording() {
     if (!recording.active) {
       const next = await call<RecordingSession>("start_recording");
       setRecording(next);
-      setNotice("录音已开始");
+      showToast("录音已开始", "success");
       return;
     }
 
     const record = await call<SpeechRecord>("stop_recording");
     setRecording({ active: false, started_at: null, status: "idle", elapsed_ms: 0 });
     mergeRecord(record);
-    setNotice(record.error_message ?? "录音处理完成");
+    showToast(record.error_message ?? "录音处理完成", record.error_message ? "error" : "success");
   }
 
   async function saveSettings(next: AppSettings) {
     const saved = await call<AppSettings>("save_settings", { settings: next });
     setSettings(saved);
+    setSettingsDraft(saved);
     applyTheme(saved.theme);
-    setNotice("设置已保存");
+    showToast("设置已保存", "success");
   }
 
   async function savePrompts(next: PromptSettings) {
     const saved = await call<PromptSettings>("save_prompt_settings", { prompts: next });
     setPrompts(saved);
-    setNotice("Preference 已保存");
+    showToast("偏好已保存", "success");
   }
 
   async function copyRecord(record: SpeechRecord) {
     await call<boolean>("copy_text", { text: record.final_text });
-    setNotice("已复制到剪贴板");
+    showToast("已复制到剪贴板", "success");
   }
 
   async function deleteRecord(id: string) {
     const next = await call<SpeechRecord[]>("delete_record", { id });
     setRecords(next);
-    setNotice("记录已删除");
+    showToast("记录已删除", "success");
   }
 
   async function confirmDeleteRecord() {
@@ -185,17 +206,20 @@ export function App() {
   }
 
   async function retryAsr(record: SpeechRecord) {
-    setNotice("文字转写中");
+    showToast("文字转写中");
     const next = await call<SpeechRecord>("retry_asr", { id: record.id });
     mergeRecord(next);
-    setNotice(next.error_message ?? "文字转写完成");
+    showToast(
+      next.error_message ?? (next.asr_status === "no_speech" ? "没有录音" : "文字转写完成"),
+      next.error_message ? "error" : "success",
+    );
   }
 
   async function retryOptimize(record: SpeechRecord) {
-    setNotice("内容优化中");
+    showToast("内容优化中");
     const next = await call<SpeechRecord>("retry_optimize", { id: record.id });
     mergeRecord(next);
-    setNotice(next.error_message ?? "内容优化完成");
+    showToast(next.error_message ?? "内容优化完成", next.error_message ? "error" : "success");
   }
 
   async function loadMoreRecords() {
@@ -254,7 +278,7 @@ export function App() {
             onClick={() => setActiveTab("preferences")}
           >
             <FileText size={18} />
-            Preference
+            偏好
           </button>
           <button className={activeTab === "settings" ? "active" : ""} onClick={() => setActiveTab("settings")}>
             <Settings size={18} />
@@ -288,11 +312,17 @@ export function App() {
             <h1>{activeTab === "home" ? "语音输入历史" : selectedTitle}</h1>
           </div>
           <div className="topbar-actions">
-            <span className="status-dot">{notice}</span>
-            <button className="primary-button" onClick={toggleRecording}>
-              <Mic size={18} />
-              {recording.active ? "结束录音" : "开始录音"}
-            </button>
+            {activeTab === "settings" && settingsDraft ? (
+              <button className="primary-button" onClick={() => saveSettings(settingsDraft)}>
+                <Save size={18} />
+                保存设置
+              </button>
+            ) : (
+              <button className="primary-button" onClick={toggleRecording}>
+                <Mic size={18} />
+                {recording.active ? "结束录音" : "开始录音"}
+              </button>
+            )}
           </div>
         </header>
 
@@ -321,10 +351,16 @@ export function App() {
           )}
 
           {activeTab === "settings" && settings && (
-            <AppSettingsView settings={settings} onSave={saveSettings} />
+            <AppSettingsView
+              settings={settingsDraft ?? settings}
+              onChange={setSettingsDraft}
+              onSave={saveSettings}
+            />
           )}
         </div>
       </main>
+
+      <ToastViewport toasts={toasts} />
 
       {selectedRecord && (
         <RecordDetailsModal
@@ -391,36 +427,44 @@ function HomeView({
     <>
       <StatsStrip stats={stats} />
       <section className="record-list" aria-label="识别历史">
-        {records.map((record) => (
-          <article className="record-item compact" key={record.id} onClick={() => onOpenDetails(record)}>
-            <div className="record-main">
-              <p className="record-text">{record.final_text || record.raw_asr_text || "没有录音"}</p>
-              <div className="record-meta-line">
-                <span>{formatDate(record.created_at)}</span>
-                <span>{statusLabel[record.asr_status] ?? record.asr_status}</span>
-                {record.duration_ms && <span>{formatDuration(record.duration_ms)}</span>}
-                {record.error_message && <span className="record-error">{record.error_message}</span>}
+        {records.map((record) => {
+          const displayText = record.final_text || record.raw_asr_text;
+          const showSkeleton = shouldShowRecordSkeleton(record);
+          return (
+            <article className="record-item compact" key={record.id} onClick={() => onOpenDetails(record)}>
+              <div className="record-main">
+                {showSkeleton ? (
+                  <InlineRecordSkeleton />
+                ) : (
+                  <p className="record-text">{displayText || "没有录音"}</p>
+                )}
+                <div className="record-meta-line">
+                  <span>{formatDate(record.created_at)}</span>
+                  <span>{statusLabel[record.asr_status] ?? record.asr_status}</span>
+                  {record.duration_ms && <span>{formatDuration(record.duration_ms)}</span>}
+                  {record.error_message && <span className="record-error">{record.error_message}</span>}
+                </div>
               </div>
-            </div>
-            <div className="record-actions" onClick={(event) => event.stopPropagation()}>
-              <IconButton label="复制" onClick={() => onCopy(record)}>
-                <Clipboard size={16} />
-              </IconButton>
-              <IconButton label="重新转写" disabled={!record.audio_path} onClick={() => onRetryAsr(record)}>
-                <FileAudio size={16} />
-              </IconButton>
-              <IconButton label="重新优化" disabled={!record.raw_asr_text} onClick={() => onRetryOptimize(record)}>
-                <RefreshCw size={16} />
-              </IconButton>
-              <IconButton label="删除" onClick={() => onDelete(record.id)}>
-                <Trash2 size={16} />
-              </IconButton>
-              <IconButton label="查看详情" onClick={() => onOpenDetails(record)}>
-                <ChevronRight size={16} />
-              </IconButton>
-            </div>
-          </article>
-        ))}
+              <div className="record-actions" onClick={(event) => event.stopPropagation()}>
+                <IconButton label="复制" onClick={() => onCopy(record)}>
+                  <Clipboard size={16} />
+                </IconButton>
+                <IconButton label="重新转写" disabled={!record.audio_path} onClick={() => onRetryAsr(record)}>
+                  <FileAudio size={16} />
+                </IconButton>
+                <IconButton label="重新优化" disabled={!record.raw_asr_text} onClick={() => onRetryOptimize(record)}>
+                  <RefreshCw size={16} />
+                </IconButton>
+                <IconButton label="删除" onClick={() => onDelete(record.id)}>
+                  <Trash2 size={16} />
+                </IconButton>
+                <IconButton label="查看详情" onClick={() => onOpenDetails(record)}>
+                  <ChevronRight size={16} />
+                </IconButton>
+              </div>
+            </article>
+          );
+        })}
         {loading && <RecordSkeleton />}
         {hasMore && (
           <button className="load-more-button" onClick={onLoadMore}>
@@ -492,6 +536,20 @@ function ConfirmDeleteModal({
   );
 }
 
+function ToastViewport({ toasts }: { toasts: Toast[] }) {
+  if (toasts.length === 0) return null;
+
+  return (
+    <div className="toast-viewport" aria-live="polite" aria-atomic="true">
+      {toasts.map((toast) => (
+        <div className={`toast ${toast.tone ?? "info"}`} key={toast.id}>
+          {toast.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RecordDetailsModal({
   record,
   onClose,
@@ -507,6 +565,32 @@ function RecordDetailsModal({
   onRetryAsr: (record: SpeechRecord) => Promise<void>;
   onRetryOptimize: (record: SpeechRecord) => Promise<void>;
 }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [audioSrc, setAudioSrc] = useState("");
+  const [audioMessage, setAudioMessage] = useState("");
+
+  async function playOriginalAudio() {
+    if (!record.audio_path) return;
+    try {
+      const src = audioSrc || (await call<string>("read_audio_data_url", { path: record.audio_path }));
+      setAudioSrc(src);
+      setAudioMessage("");
+      window.setTimeout(() => audioRef.current?.play(), 0);
+    } catch (error) {
+      setAudioMessage(String(error));
+    }
+  }
+
+  async function openAudioFolder() {
+    if (!record.audio_path) return;
+    try {
+      await call<boolean>("open_audio_folder", { path: record.audio_path });
+      setAudioMessage("");
+    } catch (error) {
+      setAudioMessage(String(error));
+    }
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="modal-panel record-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
@@ -518,6 +602,12 @@ function RecordDetailsModal({
           <div className="modal-actions">
             <IconButton label="复制优化文本" onClick={() => onCopy(record)}>
               <Clipboard size={17} />
+            </IconButton>
+            <IconButton label="播放原音频" disabled={!record.audio_path} onClick={playOriginalAudio}>
+              <Play size={17} />
+            </IconButton>
+            <IconButton label="打开录音文件夹" disabled={!record.audio_path} onClick={openAudioFolder}>
+              <FolderOpen size={17} />
             </IconButton>
             <IconButton label="重新转写" disabled={!record.audio_path} onClick={() => onRetryAsr(record)}>
               <FileAudio size={17} />
@@ -541,6 +631,14 @@ function RecordDetailsModal({
           {record.copied_at && <span>已复制 {formatDate(record.copied_at)}</span>}
           {record.pasted_at && <span>已粘贴 {formatDate(record.pasted_at)}</span>}
         </div>
+
+        {audioSrc && <audio ref={audioRef} className="detail-audio" controls src={audioSrc} />}
+        {audioMessage && (
+          <div className="inline-alert">
+            <AlertCircle size={16} />
+            {audioMessage}
+          </div>
+        )}
 
         {record.error_message && (
           <div className="inline-alert">
@@ -586,6 +684,15 @@ function RecordSkeleton() {
   );
 }
 
+function InlineRecordSkeleton() {
+  return (
+    <div className="record-text-skeleton" aria-label="正在处理">
+      <span />
+      <span />
+    </div>
+  );
+}
+
 function ModelSettings({
   settings,
   onSave,
@@ -596,6 +703,12 @@ function ModelSettings({
   const [draft, setDraft] = useState(settings);
   const [editingProvider, setEditingProvider] = useState<"doubao" | "openrouter" | null>(null);
   const [testStatus, setTestStatus] = useState("");
+  const [newModelName, setNewModelName] = useState("");
+  const openrouterModels = useMemo(() => normalizeModelList(draft), [draft]);
+
+  useEffect(() => {
+    setDraft(settings);
+  }, [settings]);
 
   async function testDoubao() {
     setTestStatus("正在检查豆包配置");
@@ -617,14 +730,66 @@ function ModelSettings({
     }
   }
 
+  function selectOpenRouterModel(openrouter_model: string) {
+    setDraft({ ...draft, openrouter_model, openrouter_models: openrouterModels });
+  }
+
+  function addOpenRouterModel() {
+    const model = newModelName.trim();
+    if (!model) return;
+    const openrouter_models = Array.from(new Set([...openrouterModels, model]));
+    setDraft({ ...draft, openrouter_model: model, openrouter_models });
+    setNewModelName("");
+  }
+
+  function deleteOpenRouterModel(model: string) {
+    const openrouter_models = openrouterModels.filter((item) => item !== model);
+    const openrouter_model = draft.openrouter_model === model ? (openrouter_models[0] ?? "") : draft.openrouter_model;
+    setDraft({ ...draft, openrouter_model, openrouter_models });
+  }
+
   return (
     <section className="settings-page provider-page">
+      <section className="model-defaults">
+        <header className="model-defaults-header">
+          <Settings size={24} />
+          <div>
+            <p>默认模型</p>
+            <h2>选择模型</h2>
+          </div>
+        </header>
+        <div className="model-select-grid">
+          <label className="model-select-card">
+            <span>语音识别模型</span>
+            <select value="doubao-streaming" onChange={() => undefined}>
+              <option value="doubao-streaming">豆包流式语音识别模型 2.0</option>
+            </select>
+            <small>流式音频转文本模型</small>
+          </label>
+          <label className="model-select-card">
+            <span>文本优化模型</span>
+            <select
+              value={draft.openrouter_model}
+              onChange={(event) => selectOpenRouterModel(event.currentTarget.value)}
+            >
+              {openrouterModels.length === 0 && <option value="">未设置模型</option>}
+              {openrouterModels.map((model) => (
+                <option value={model} key={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+            <small>文本优化模型</small>
+          </label>
+        </div>
+      </section>
+
       <div className="provider-grid">
         <ProviderCard
           icon={<Headphones size={20} />}
-          title="豆包流式 ASR"
-          eyebrow="语音识别 Provider"
-          description="只负责把录音转成原始文字，不走系统代理。"
+          title="豆包"
+          eyebrow="ASR Provider"
+          description="当前仅支持豆包流式识别，负责把录音转成原始文字。"
           status={draft.doubao_auth_mode === "app_access_key" ? "App Key 鉴权" : "API Key 鉴权"}
           onEdit={() => setEditingProvider("doubao")}
           onTest={testDoubao}
@@ -632,22 +797,17 @@ function ModelSettings({
         <ProviderCard
           icon={<Bot size={20} />}
           title="OpenRouter"
-          eyebrow="文本优化 Provider"
-          description="OpenAI compatible chat completions，默认走系统代理。"
+          eyebrow="文本模型 Provider"
+          description="管理 API、Endpoint 和可选文本模型。"
           status={draft.openrouter_model || "未设置模型"}
           onEdit={() => setEditingProvider("openrouter")}
           onTest={testOpenRouter}
         />
-        <button className="provider-card add-provider" type="button" disabled>
-          <Plus size={20} />
-          <span>新增 Provider</span>
-          <small>后续扩展多 provider 时启用</small>
-        </button>
       </div>
 
       {testStatus && <div className="inline-alert neutral"><CheckCircle2 size={16} />{testStatus}</div>}
 
-      <button className="primary-button save-button" onClick={() => onSave(draft)}>
+      <button className="primary-button save-button" onClick={() => onSave({ ...draft, openrouter_models: openrouterModels })}>
         <Save size={18} />
         保存模型配置
       </button>
@@ -677,7 +837,6 @@ function ModelSettings({
         <ProviderModal title="OpenRouter" onClose={() => setEditingProvider(null)} onTest={testOpenRouter}>
           <TextField label="API Key" value={draft.openrouter_api_key} type="password" onChange={(openrouter_api_key) => setDraft({ ...draft, openrouter_api_key })} />
           <TextField label="Base URL" value={draft.openrouter_base_url} onChange={(openrouter_base_url) => setDraft({ ...draft, openrouter_base_url })} />
-          <TextField label="Model" value={draft.openrouter_model} onChange={(openrouter_model) => setDraft({ ...draft, openrouter_model })} />
           <TextField label="HTTP-Referer" value={draft.openrouter_http_referer} onChange={(openrouter_http_referer) => setDraft({ ...draft, openrouter_http_referer })} />
           <TextField label="X-OpenRouter-Title" value={draft.openrouter_title} onChange={(openrouter_title) => setDraft({ ...draft, openrouter_title })} />
           <label className="toggle-field">
@@ -688,6 +847,45 @@ function ModelSettings({
             />
             OpenRouter 走系统代理
           </label>
+          <section className="model-manager">
+            <div className="model-manager-heading">
+              <div>
+                <h3>模型</h3>
+                <p>添加常用模型，然后在上方默认模型里选择。</p>
+              </div>
+              <div className="model-add-row">
+                <input
+                  value={newModelName}
+                  placeholder="例如 openai/gpt-4.1-mini"
+                  onChange={(event) => setNewModelName(event.currentTarget.value)}
+                />
+                <button className="secondary-button" type="button" onClick={addOpenRouterModel}>
+                  <Plus size={16} />
+                  添加模型
+                </button>
+              </div>
+            </div>
+            <div className="model-list">
+              {openrouterModels.length === 0 && <p className="empty-model-list">还没有模型。</p>}
+              {openrouterModels.map((model) => (
+                <article className={model === draft.openrouter_model ? "model-row active" : "model-row"} key={model}>
+                  <div>
+                    <strong>{model}</strong>
+                    <span>{model === draft.openrouter_model ? "当前文本模型" : "自定义"}</span>
+                  </div>
+                  <div className="model-row-actions">
+                    <IconButton label="删除模型" onClick={() => deleteOpenRouterModel(model)}>
+                      <Trash2 size={16} />
+                    </IconButton>
+                    <button className="secondary-button" type="button" onClick={() => selectOpenRouterModel(model)}>
+                      <CheckCircle2 size={16} />
+                      设为默认
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
         </ProviderModal>
       )}
     </section>
@@ -767,23 +965,31 @@ function ProviderModal({
 }
 
 function AppSettingsView({
+  onChange,
   settings,
   onSave,
 }: {
+  onChange: (settings: AppSettings) => void;
   settings: AppSettings;
   onSave: (settings: AppSettings) => Promise<void>;
 }) {
-  const [draft, setDraft] = useState(settings);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<"recording" | "appearance" | "logs" | "about">("recording");
   const [microphones, setMicrophones] = useState<string[]>([]);
   const [logs, setLogs] = useState("");
   const [capturingShortcut, setCapturingShortcut] = useState(false);
   const [micTestStatus, setMicTestStatus] = useState("");
   const [micSampleSrc, setMicSampleSrc] = useState("");
+  const [appVersion, setAppVersion] = useState("");
+  const [updateStatus, setUpdateStatus] = useState("尚未检查更新");
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   useEffect(() => {
     call<string[]>("list_microphones")
       .then(setMicrophones)
       .catch(() => setMicrophones([]));
+    call<string>("get_app_version")
+      .then(setAppVersion)
+      .catch(() => setAppVersion(""));
   }, []);
 
   useEffect(() => {
@@ -792,13 +998,13 @@ function AppSettingsView({
     function handleKeyDown(event: KeyboardEvent) {
       event.preventDefault();
       event.stopPropagation();
-      setDraft((current) => ({ ...current, global_shortcut: normalizeShortcutCode(event.code) }));
+      onChange({ ...settings, global_shortcut: normalizeShortcutCode(event.code) });
       setCapturingShortcut(false);
     }
 
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [capturingShortcut]);
+  }, [capturingShortcut, onChange, settings]);
 
   async function loadLogs() {
     const content = await call<string>("read_logs");
@@ -808,8 +1014,9 @@ function AppSettingsView({
   async function recordMicrophoneSample() {
     setMicTestStatus("正在录制试听片段");
     try {
-      const path = await call<string>("record_microphone_sample", { microphoneName: draft.microphone_name });
-      setMicSampleSrc(convertFileSrc(path));
+      const path = await call<string>("record_microphone_sample", { microphoneName: settings.microphone_name });
+      const src = await call<string>("read_audio_data_url", { path });
+      setMicSampleSrc(src);
       setMicTestStatus("试听片段已录好");
     } catch (error) {
       setMicTestStatus(String(error));
@@ -817,9 +1024,45 @@ function AppSettingsView({
     }
   }
 
+  async function checkForUpdate() {
+    setCheckingUpdate(true);
+    setUpdateStatus("正在检查更新");
+    try {
+      const update = await check();
+      if (!update) {
+        setUpdateStatus("当前已经是最新版本");
+        return;
+      }
+      setUpdateStatus(`发现 ${update.version}，正在下载并安装`);
+      await update.downloadAndInstall();
+      setUpdateStatus("更新安装完成，正在重启");
+      await relaunch();
+    } catch (error) {
+      setUpdateStatus(`检查更新失败：${String(error)}`);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
   return (
-    <section className="settings-page">
-      <div className="settings-section">
+    <section className="settings-page settings-tabs-page">
+      <div className="settings-tab-list" role="tablist" aria-label="设置分类">
+        <button className={activeSettingsTab === "recording" ? "active" : ""} type="button" onClick={() => setActiveSettingsTab("recording")}>
+          录音
+        </button>
+        <button className={activeSettingsTab === "appearance" ? "active" : ""} type="button" onClick={() => setActiveSettingsTab("appearance")}>
+          外观
+        </button>
+        <button className={activeSettingsTab === "logs" ? "active" : ""} type="button" onClick={() => setActiveSettingsTab("logs")}>
+          日志
+        </button>
+        <button className={activeSettingsTab === "about" ? "active" : ""} type="button" onClick={() => setActiveSettingsTab("about")}>
+          关于
+        </button>
+      </div>
+
+      {activeSettingsTab === "recording" && (
+        <div className="settings-section">
         <div className="section-heading">
           <h2>录音</h2>
           <p>选择麦克风和全局快捷键。</p>
@@ -828,8 +1071,8 @@ function AppSettingsView({
           <label className="text-field">
             <span>麦克风</span>
             <select
-              value={draft.microphone_name}
-              onChange={(event) => setDraft({ ...draft, microphone_name: event.currentTarget.value })}
+              value={settings.microphone_name}
+              onChange={(event) => onChange({ ...settings, microphone_name: event.currentTarget.value })}
             >
               <option value="">系统默认麦克风</option>
               {microphones.map((name) => (
@@ -853,20 +1096,20 @@ function AppSettingsView({
               type="button"
               onClick={() => setCapturingShortcut(true)}
             >
-              {capturingShortcut ? "请按下一个键" : shortcutLabel(draft.global_shortcut)}
+              {capturingShortcut ? "请按下一个键" : shortcutLabel(settings.global_shortcut)}
             </button>
           </label>
           <TextField
             label="录音保留天数"
-            value={String(draft.recording_retention_days)}
+            value={String(settings.recording_retention_days)}
             type="number"
-            onChange={(value) => setDraft({ ...draft, recording_retention_days: Number(value) || 1 })}
+            onChange={(value) => onChange({ ...settings, recording_retention_days: Number(value) || 1 })}
           />
           <label className="toggle-field">
             <input
-              checked={draft.auto_paste}
+              checked={settings.auto_paste}
               type="checkbox"
-              onChange={(event) => setDraft({ ...draft, auto_paste: event.currentTarget.checked })}
+              onChange={(event) => onChange({ ...settings, auto_paste: event.currentTarget.checked })}
             />
             整理成功后自动粘贴
           </label>
@@ -874,37 +1117,68 @@ function AppSettingsView({
         {micTestStatus && <div className="inline-alert neutral"><CheckCircle2 size={16} />{micTestStatus}</div>}
         {micSampleSrc && <audio className="audio-preview" controls src={micSampleSrc} />}
       </div>
+      )}
 
-      <div className="settings-section">
+      {activeSettingsTab === "appearance" && (
+        <div className="settings-section">
         <div className="section-heading">
           <h2>外观</h2>
           <p>选择界面主题。</p>
         </div>
         <div className="field-grid">
-          <label className="text-field">
-            <span>主题</span>
-            <select
-              value={draft.theme}
-              onChange={(event) => setDraft({ ...draft, theme: event.currentTarget.value })}
+          <div className="theme-buttons" role="group" aria-label="主题">
+            <button
+              className={settings.theme === "system" ? "active" : ""}
+              type="button"
+              onClick={() => {
+                const next = { ...settings, theme: "system" };
+                onChange(next);
+                onSave(next);
+              }}
             >
-              <option value="system">跟随系统</option>
-              <option value="light">浅色</option>
-              <option value="dark">深色</option>
-            </select>
-          </label>
+              <Monitor size={16} />
+              跟随系统
+            </button>
+            <button
+              className={settings.theme === "light" ? "active" : ""}
+              type="button"
+              onClick={() => {
+                const next = { ...settings, theme: "light" };
+                onChange(next);
+                onSave(next);
+              }}
+            >
+              <Sun size={16} />
+              浅色
+            </button>
+            <button
+              className={settings.theme === "dark" ? "active" : ""}
+              type="button"
+              onClick={() => {
+                const next = { ...settings, theme: "dark" };
+                onChange(next);
+                onSave(next);
+              }}
+            >
+              <Moon size={16} />
+              深色
+            </button>
+          </div>
         </div>
       </div>
+      )}
 
-      <div className="settings-section">
+      {activeSettingsTab === "logs" && (
+        <div className="settings-section">
         <div className="section-heading">
           <h2>日志</h2>
           <p>保存和查看本地运行日志。</p>
         </div>
         <label className="toggle-field">
           <input
-            checked={draft.save_logs}
+            checked={settings.save_logs}
             type="checkbox"
-            onChange={(event) => setDraft({ ...draft, save_logs: event.currentTarget.checked })}
+            onChange={(event) => onChange({ ...settings, save_logs: event.currentTarget.checked })}
           />
           保存日志
         </label>
@@ -915,11 +1189,28 @@ function AppSettingsView({
         </div>
         {logs && <pre className="log-viewer">{logs}</pre>}
       </div>
+      )}
 
-      <button className="primary-button save-button" onClick={() => onSave(draft)}>
-        <Save size={18} />
-        保存设置
-      </button>
+      {activeSettingsTab === "about" && (
+        <div className="settings-section about-section">
+          <img className="about-logo" src="/logo.svg" alt="" />
+          <h2>SparkSpeech</h2>
+          <p>简约、大方、开源的类闪电说智能语音输入法。</p>
+          <div className="about-version-row">
+            <span>v{appVersion || "未知"}</span>
+            <button className="secondary-button" type="button" disabled={checkingUpdate} onClick={checkForUpdate}>
+              <RefreshCw size={16} />
+              {checkingUpdate ? "检查中" : "检查更新"}
+            </button>
+          </div>
+          <div className="about-update-status">{updateStatus}</div>
+          <div className="about-links">
+            <a href="https://github.com/lanbinleo/SparkSpeech" target="_blank" rel="noreferrer">GitHub</a>
+            <span>·</span>
+            <a href="https://github.com/lanbinleo/SparkSpeech/releases" target="_blank" rel="noreferrer">Releases</a>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -971,7 +1262,7 @@ function PreferenceSettings({
 
       <button className="primary-button save-button" onClick={() => onSave(draft)}>
         <Wand2 size={18} />
-        保存 Preference
+        保存偏好
       </button>
     </section>
   );
@@ -1023,13 +1314,30 @@ function IconButton({
 
 function buildStats(records: SpeechRecord[]): HomeStats {
   const totalMs = records.reduce((sum, record) => sum + (record.duration_ms ?? 0), 0);
-  const totalChars = records.reduce((sum, record) => sum + countTextChars(record.final_text || record.raw_asr_text), 0);
-  const minutes = totalMs / 60_000;
+  const optimizedRecords = records.filter(
+    (record) => record.optimize_status === "completed" && record.final_text.trim() && record.duration_ms,
+  );
+  const totalChars = optimizedRecords.reduce((sum, record) => sum + countTextChars(record.final_text), 0);
+  const optimizedMs = optimizedRecords.reduce((sum, record) => sum + (record.duration_ms ?? 0), 0);
+  const minutes = optimizedMs / 60_000;
   return {
     totalHours: totalMs / 3_600_000,
     totalChars,
     charsPerMinute: minutes > 0 ? Math.round(totalChars / minutes) : 0,
   };
+}
+
+function shouldShowRecordSkeleton(record: SpeechRecord) {
+  if ((record.final_text || record.raw_asr_text).trim()) return false;
+  if (record.error_message) return false;
+  if (record.asr_status === "no_speech" || record.asr_status === "failed") return false;
+  return record.asr_status === "pending" || record.optimize_status === "pending";
+}
+
+function normalizeModelList(settings: AppSettings) {
+  const models = settings.openrouter_models ?? [];
+  const selected = settings.openrouter_model.trim();
+  return Array.from(new Set([...models, selected].map((model) => model.trim()).filter(Boolean)));
 }
 
 function countTextChars(text: string) {
@@ -1048,7 +1356,7 @@ function formatDuration(ms: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   if (minutes === 0) return `${seconds} 秒`;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  return seconds === 0 ? `${minutes} 分` : `${minutes} 分 ${seconds} 秒`;
 }
 
 function formatDate(value: string) {

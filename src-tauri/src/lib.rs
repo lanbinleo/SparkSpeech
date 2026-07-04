@@ -2,8 +2,11 @@
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
+            get_app_version,
             save_settings,
             save_prompt_settings,
             list_records,
@@ -14,6 +17,9 @@ pub fn run() {
             stop_recording,
             retry_asr,
             retry_optimize,
+            read_audio_data_url,
+            open_audio_folder,
+            open_main_window,
             get_overlay_state,
             list_microphones,
             read_logs,
@@ -37,7 +43,7 @@ pub fn run() {
             create_tray(app)?;
 
             if let Some(overlay) = app.get_webview_window("overlay") {
-                position_overlay(&overlay)?;
+                position_overlay(&overlay, false)?;
             }
 
             Ok(())
@@ -63,6 +69,7 @@ mod storage;
 use std::{path::PathBuf, sync::Mutex};
 
 use arboard::Clipboard;
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{Duration, Utc};
 use models::{
     AppSettings, BootstrapData, OverlayState, PromptSettings, RecordPage, RecordingSession,
@@ -71,7 +78,7 @@ use models::{
 use recorder::AudioRecorder;
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     App, AppHandle, Emitter, Manager, State, WebviewWindow,
 };
 use uuid::Uuid;
@@ -96,12 +103,19 @@ fn create_tray(app: &App) -> tauri::Result<()> {
         .tooltip("SparkSpeech")
         .menu(&menu)
         .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let _ = show_main_window(tray.app_handle());
+            }
+        })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open-main" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                let _ = show_main_window(app);
             }
             "quit" => app.exit(0),
             _ => {}
@@ -113,6 +127,11 @@ fn create_tray(app: &App) -> tauri::Result<()> {
 
     builder.build(app)?;
     Ok(())
+}
+
+#[tauri::command]
+fn get_app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 #[tauri::command]
@@ -235,6 +254,57 @@ async fn debug_transcribe_file(app: AppHandle, path: String) -> Result<String, S
 }
 
 #[tauri::command]
+fn read_audio_data_url(path: String) -> Result<String, String> {
+    let path = PathBuf::from(path);
+    if !path.exists() {
+        return Err("录音文件不存在".into());
+    }
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "data:audio/wav;base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[tauri::command]
+fn open_audio_folder(path: String) -> Result<bool, String> {
+    let path = PathBuf::from(path);
+    if !path.exists() {
+        return Err("录音文件不存在".into());
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn open_main_window(app: AppHandle) -> Result<bool, String> {
+    show_main_window(&app)?;
+    Ok(true)
+}
+
+fn show_main_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        let overlay_state = OverlayState::default();
+        if let Some(app_state) = app.try_state::<AppState>() {
+            if let Ok(mut state) = app_state.overlay.lock() {
+                *state = overlay_state.clone();
+            }
+        }
+        if let Some(overlay) = app.get_webview_window("overlay") {
+            let _ = overlay.emit("overlay-state", overlay_state);
+            let _ = overlay.hide();
+        }
+        return Ok(());
+    }
+    Err("主窗口不可用".into())
+}
+
+#[tauri::command]
 fn get_overlay_state(state: State<'_, AppState>) -> Result<OverlayState, String> {
     state
         .overlay
@@ -325,7 +395,7 @@ async fn stop_recording(
         Ok(record) => record,
         Err(record) => {
             reset_recording_state(&app, &state)?;
-            hide_overlay_later(app.clone());
+            finish_overlay_after_record(app.clone(), &record);
             return Ok(record);
         }
     };
@@ -335,7 +405,7 @@ async fn stop_recording(
     record = optimize_record(app.clone(), record).await;
 
     reset_recording_state(&app, &state)?;
-    hide_overlay_later(app.clone());
+    finish_overlay_after_record(app.clone(), &record);
     Ok(record)
 }
 
@@ -346,7 +416,7 @@ async fn retry_asr(app: AppHandle, id: String) -> Result<SpeechRecord, String> {
     let record = match transcribe_record(app.clone(), record).await {
         Ok(record) | Err(record) => record,
     };
-    hide_overlay_later(app.clone());
+    finish_overlay_after_record(app.clone(), &record);
     Ok(record)
 }
 
@@ -355,7 +425,7 @@ async fn retry_optimize(app: AppHandle, id: String) -> Result<SpeechRecord, Stri
     let record = storage::find_record(&app, &id)?;
     show_overlay(&app, "optimizing", "内容优化中", 0)?;
     let record = optimize_record(app.clone(), record).await;
-    hide_overlay_later(app.clone());
+    finish_overlay_after_record(app.clone(), &record);
     Ok(record)
 }
 
@@ -491,6 +561,7 @@ fn show_overlay(app: &AppHandle, phase: &str, label: &str, elapsed_ms: u64) -> R
         label: label.into(),
         elapsed_ms,
         input_level: 0.0,
+        action_label: None,
     };
     if let Some(app_state) = app.try_state::<AppState>() {
         if let Ok(mut overlay_state) = app_state.overlay.lock() {
@@ -499,7 +570,7 @@ fn show_overlay(app: &AppHandle, phase: &str, label: &str, elapsed_ms: u64) -> R
     }
 
     if let Some(overlay) = app.get_webview_window("overlay") {
-        position_overlay(&overlay)?;
+        position_overlay(&overlay, false)?;
         overlay.show().map_err(|error| error.to_string())?;
         overlay
             .emit("overlay-state", state.clone())
@@ -544,6 +615,7 @@ fn start_overlay_level_loop(app: AppHandle) {
                 label: "直接说".into(),
                 elapsed_ms: 0,
                 input_level,
+                action_label: None,
             };
 
             if let Ok(mut overlay_state) = app_state.overlay.lock() {
@@ -554,6 +626,49 @@ fn start_overlay_level_loop(app: AppHandle) {
             }
         }
     });
+}
+
+fn finish_overlay_after_record(app: AppHandle, record: &SpeechRecord) {
+    if record.error_message.is_some() {
+        let _ = show_action_overlay(
+            &app,
+            "录音已保存",
+            "网络恢复后可在主界面重新转写或重新优化",
+            "打开主界面",
+        );
+    } else {
+        hide_overlay_later(app);
+    }
+}
+
+fn show_action_overlay(
+    app: &AppHandle,
+    title: &str,
+    detail: &str,
+    action_label: &str,
+) -> Result<(), String> {
+    let state = OverlayState {
+        visible: true,
+        phase: "attention".into(),
+        label: format!("{title}：{detail}"),
+        elapsed_ms: 0,
+        input_level: 0.0,
+        action_label: Some(action_label.into()),
+    };
+    if let Some(app_state) = app.try_state::<AppState>() {
+        if let Ok(mut overlay_state) = app_state.overlay.lock() {
+            *overlay_state = state.clone();
+        }
+    }
+
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        position_overlay(&overlay, true)?;
+        overlay.show().map_err(|error| error.to_string())?;
+        overlay
+            .emit("overlay-state", state)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn hide_overlay_later(app: AppHandle) {
@@ -572,17 +687,20 @@ fn hide_overlay_later(app: AppHandle) {
     });
 }
 
-fn position_overlay(window: &WebviewWindow) -> Result<(), String> {
+fn position_overlay(window: &WebviewWindow, expanded: bool) -> Result<(), String> {
     if let Some(monitor) = window
         .current_monitor()
         .map_err(|error| error.to_string())?
     {
         let size = monitor.size();
         let scale = monitor.scale_factor();
-        let width = 260.0;
-        let height = 60.0;
+        let width = if expanded { 420.0 } else { 260.0 };
+        let height = if expanded { 116.0 } else { 60.0 };
         let x = (size.width as f64 / scale - width) / 2.0;
         let y = size.height as f64 / scale - height - 36.0;
+        window
+            .set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
+            .map_err(|error| error.to_string())?;
         window
             .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
             .map_err(|error| error.to_string())?;

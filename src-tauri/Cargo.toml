@@ -1,6 +1,6 @@
 [package]
 name = "sparkspeech"
-version = "0.1.0"
+version = "0.1.1"
 description = "Personal Windows voice input tool"
 authors = ["Leo"]
 license = ""
@@ -24,6 +24,7 @@ log = "0.4"
 tauri = { version = "2.11.3", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 arboard = "3.6"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.19", features = ["v4", "serde"] }
 cpal = "0.16"
@@ -40,3 +41,5 @@ windows = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging"
 ] }
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
