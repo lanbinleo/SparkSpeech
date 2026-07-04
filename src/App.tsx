@@ -42,6 +42,7 @@ import type {
 } from "./tauri";
 
 type Tab = "home" | "models" | "preferences" | "settings";
+type TextProviderKey = "openrouter" | "deepseek" | "custom_openai";
 type Toast = {
   id: number;
   message: string;
@@ -60,6 +61,7 @@ const statusLabel: Record<string, string> = {
   mocked: "本地模拟",
   failed: "失败",
   blocked: "等待转写",
+  recovered: "已恢复录音",
   no_speech: "没有录音",
 };
 
@@ -69,7 +71,7 @@ export function App() {
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings | null>(null);
-  const [prompts, setPrompts] = useState<PromptSettings | null>(null);
+  const [promptsDraft, setPromptsDraft] = useState<PromptSettings | null>(null);
   const [records, setRecords] = useState<SpeechRecord[]>([]);
   const [hasMoreRecords, setHasMoreRecords] = useState(false);
   const [recordsLoading, setRecordsLoading] = useState(true);
@@ -92,7 +94,7 @@ export function App() {
         setSettings(data.settings);
         setSettingsDraft(data.settings);
         applyTheme(data.settings.theme);
-        setPrompts(data.prompts);
+        setPromptsDraft(data.prompts);
         setRecords(data.records);
         setHasMoreRecords(data.records.length >= pageSize);
         setRecording(data.recording);
@@ -219,7 +221,7 @@ export function App() {
 
   async function savePrompts(next: PromptSettings) {
     const saved = await call<PromptSettings>("save_prompt_settings", { prompts: next });
-    setPrompts(saved);
+    setPromptsDraft(saved);
     showToast("偏好已保存", "success");
   }
 
@@ -371,6 +373,11 @@ export function App() {
                 <Save size={18} />
                 保存设置
               </button>
+            ) : activeTab === "preferences" && promptsDraft ? (
+              <button className="primary-button" onClick={() => savePrompts(promptsDraft)}>
+                <Save size={18} />
+                保存偏好
+              </button>
             ) : (
               <button className="primary-button" onClick={toggleRecording}>
                 <Mic size={18} />
@@ -400,8 +407,8 @@ export function App() {
             <ModelSettings settings={settings} onSave={saveSettings} />
           )}
 
-          {activeTab === "preferences" && prompts && (
-            <PreferenceSettings prompts={prompts} onSave={savePrompts} />
+          {activeTab === "preferences" && promptsDraft && (
+            <PreferenceSettings prompts={promptsDraft} onChange={setPromptsDraft} onSave={savePrompts} />
           )}
 
           {activeTab === "settings" && settings && (
@@ -585,7 +592,7 @@ function ConfirmDeleteModal({
             <X size={17} />
           </IconButton>
         </header>
-        <p className="confirm-copy">删除后会从历史记录中移除。录音文件如果还在本地，也会失去这条记录入口。</p>
+        <p className="confirm-copy">删除后会从历史记录中移除，并同时删除这条记录对应的本地录音文件。</p>
         <div className="confirm-actions">
           <button className="secondary-button" type="button" onClick={onCancel}>
             取消
@@ -764,10 +771,11 @@ function ModelSettings({
   onSave: (settings: AppSettings) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(settings);
-  const [editingProvider, setEditingProvider] = useState<"doubao" | "openrouter" | null>(null);
+  const [editingProvider, setEditingProvider] = useState<"doubao" | "openrouter" | "deepseek" | "custom_openai" | null>(null);
   const [testStatus, setTestStatus] = useState("");
   const [newModelName, setNewModelName] = useState("");
   const openrouterModels = useMemo(() => normalizeModelList(draft), [draft]);
+  const textModelOptions = useMemo(() => buildTextModelOptions(draft), [draft]);
 
   useEffect(() => {
     setDraft(settings);
@@ -783,10 +791,11 @@ function ModelSettings({
     }
   }
 
-  async function testOpenRouter() {
-    setTestStatus("正在测试 OpenRouter");
+  async function testTextProvider(provider: TextProviderKey = getTextProviderKey(draft.optimize_provider)) {
+    const settingsToTest = { ...draft, optimize_provider: provider };
+    setTestStatus(`正在测试 ${getActiveTextProviderLabel(settingsToTest)}`);
     try {
-      const message = await call<string>("test_openrouter", { settings: draft });
+      const message = await call<string>("test_openrouter", { settings: settingsToTest });
       setTestStatus(message);
     } catch (error) {
       setTestStatus(String(error));
@@ -794,7 +803,7 @@ function ModelSettings({
   }
 
   function selectOpenRouterModel(openrouter_model: string) {
-    setDraft({ ...draft, openrouter_model, openrouter_models: openrouterModels });
+    setDraft({ ...draft, optimize_provider: "openrouter", openrouter_model, openrouter_models: openrouterModels });
   }
 
   function addOpenRouterModel() {
@@ -810,6 +819,26 @@ function ModelSettings({
     const openrouter_model = draft.openrouter_model === model ? (openrouter_models[0] ?? "") : draft.openrouter_model;
     setDraft({ ...draft, openrouter_model, openrouter_models });
   }
+
+  function selectTextModel(value: string) {
+    const separator = value.indexOf("|");
+    if (separator < 0) return;
+    const provider = value.slice(0, separator);
+    const model = value.slice(separator + 1);
+    if (provider === "deepseek") {
+      setDraft({ ...draft, optimize_provider: "deepseek", deepseek_model: model });
+      return;
+    }
+    if (provider === "custom_openai") {
+      setDraft({ ...draft, optimize_provider: "custom_openai", custom_openai_model: model });
+      return;
+    }
+    setDraft({ ...draft, optimize_provider: "openrouter", openrouter_model: model, openrouter_models: openrouterModels });
+  }
+
+  const activeTextModel = getActiveTextModel(draft);
+  const activeTextProvider = getActiveTextProviderLabel(draft);
+  const activeTextModelKey = `${draft.optimize_provider}|${activeTextModel}`;
 
   return (
     <section className="settings-page provider-page">
@@ -832,17 +861,17 @@ function ModelSettings({
           <label className="model-select-card">
             <span>文本优化模型</span>
             <select
-              value={draft.openrouter_model}
-              onChange={(event) => selectOpenRouterModel(event.currentTarget.value)}
+              value={activeTextModelKey}
+              onChange={(event) => selectTextModel(event.currentTarget.value)}
             >
-              {openrouterModels.length === 0 && <option value="">未设置模型</option>}
-              {openrouterModels.map((model) => (
-                <option value={model} key={model}>
-                  {model}
+              {textModelOptions.length === 0 && <option value="">未设置模型</option>}
+              {textModelOptions.map((option) => (
+                <option value={option.value} key={option.value}>
+                  {option.label}
                 </option>
               ))}
             </select>
-            <small>文本优化模型</small>
+            <small>{activeTextProvider} · {activeTextModel || "未设置模型"}</small>
           </label>
         </div>
       </section>
@@ -862,9 +891,27 @@ function ModelSettings({
           title="OpenRouter"
           eyebrow="文本模型 Provider"
           description="管理 API、Endpoint 和可选文本模型。"
-          status={draft.openrouter_model || "未设置模型"}
+          status={draft.optimize_provider === "openrouter" ? `当前：${draft.openrouter_model || "未设置模型"}` : draft.openrouter_model || "未设置模型"}
           onEdit={() => setEditingProvider("openrouter")}
-          onTest={testOpenRouter}
+          onTest={() => testTextProvider("openrouter")}
+        />
+        <ProviderCard
+          icon={<Bot size={20} />}
+          title="DeepSeek"
+          eyebrow="OpenAI-compatible"
+          description="使用 DeepSeek API 做 ASR 文本优化。"
+          status={draft.optimize_provider === "deepseek" ? `当前：${draft.deepseek_model || "未设置模型"}` : draft.deepseek_model || "未设置模型"}
+          onEdit={() => setEditingProvider("deepseek")}
+          onTest={() => testTextProvider("deepseek")}
+        />
+        <ProviderCard
+          icon={<Bot size={20} />}
+          title={draft.custom_openai_provider_name || "Custom"}
+          eyebrow="OpenAI-compatible"
+          description="自定义 Base URL、API Key 和模型名。"
+          status={draft.optimize_provider === "custom_openai" ? `当前：${draft.custom_openai_model || "未设置模型"}` : draft.custom_openai_model || "未设置模型"}
+          onEdit={() => setEditingProvider("custom_openai")}
+          onTest={() => testTextProvider("custom_openai")}
         />
       </div>
 
@@ -897,7 +944,7 @@ function ModelSettings({
       )}
 
       {editingProvider === "openrouter" && (
-        <ProviderModal title="OpenRouter" onClose={() => setEditingProvider(null)} onTest={testOpenRouter}>
+        <ProviderModal title="OpenRouter" onClose={() => setEditingProvider(null)} onTest={() => testTextProvider("openrouter")}>
           <TextField label="API Key" value={draft.openrouter_api_key} type="password" onChange={(openrouter_api_key) => setDraft({ ...draft, openrouter_api_key })} />
           <TextField label="Base URL" value={draft.openrouter_base_url} onChange={(openrouter_base_url) => setDraft({ ...draft, openrouter_base_url })} />
           <TextField label="HTTP-Referer" value={draft.openrouter_http_referer} onChange={(openrouter_http_referer) => setDraft({ ...draft, openrouter_http_referer })} />
@@ -942,13 +989,38 @@ function ModelSettings({
                     </IconButton>
                     <button className="secondary-button" type="button" onClick={() => selectOpenRouterModel(model)}>
                       <CheckCircle2 size={16} />
-                      设为默认
+                      设为当前
                     </button>
                   </div>
                 </article>
               ))}
             </div>
           </section>
+        </ProviderModal>
+      )}
+
+      {editingProvider === "deepseek" && (
+        <ProviderModal title="DeepSeek" onClose={() => setEditingProvider(null)} onTest={() => testTextProvider("deepseek")}>
+          <TextField label="API Key" value={draft.deepseek_api_key} type="password" onChange={(deepseek_api_key) => setDraft({ ...draft, deepseek_api_key })} />
+          <TextField label="Base URL" value={draft.deepseek_base_url} onChange={(deepseek_base_url) => setDraft({ ...draft, deepseek_base_url })} />
+          <TextField label="模型" value={draft.deepseek_model} onChange={(deepseek_model) => setDraft({ ...draft, deepseek_model })} />
+          <button className="secondary-button" type="button" onClick={() => setDraft({ ...draft, optimize_provider: "deepseek" })}>
+            <CheckCircle2 size={16} />
+            设为当前模型
+          </button>
+        </ProviderModal>
+      )}
+
+      {editingProvider === "custom_openai" && (
+        <ProviderModal title="自定义 OpenAI-compatible" onClose={() => setEditingProvider(null)} onTest={() => testTextProvider("custom_openai")}>
+          <TextField label="名称" value={draft.custom_openai_provider_name} onChange={(custom_openai_provider_name) => setDraft({ ...draft, custom_openai_provider_name })} />
+          <TextField label="API Key" value={draft.custom_openai_api_key} type="password" onChange={(custom_openai_api_key) => setDraft({ ...draft, custom_openai_api_key })} />
+          <TextField label="Base URL" value={draft.custom_openai_base_url} onChange={(custom_openai_base_url) => setDraft({ ...draft, custom_openai_base_url })} />
+          <TextField label="模型" value={draft.custom_openai_model} onChange={(custom_openai_model) => setDraft({ ...draft, custom_openai_model })} />
+          <button className="secondary-button" type="button" onClick={() => setDraft({ ...draft, optimize_provider: "custom_openai" })}>
+            <CheckCircle2 size={16} />
+            设为当前模型
+          </button>
         </ProviderModal>
       )}
     </section>
@@ -1168,14 +1240,18 @@ function AppSettingsView({
             type="number"
             onChange={(value) => onChange({ ...settings, recording_retention_days: Number(value) || 1 })}
           />
-          <label className="toggle-field">
-            <input
-              checked={settings.auto_paste}
-              type="checkbox"
-              onChange={(event) => onChange({ ...settings, auto_paste: event.currentTarget.checked })}
-            />
-            整理成功后自动粘贴
-          </label>
+          <SettingsSwitch
+            checked={settings.auto_paste}
+            title="整理成功后自动粘贴"
+            description="整理完成后直接粘贴到当前光标位置。"
+            onChange={(checked) => onChange({ ...settings, auto_paste: checked })}
+          />
+          <SettingsSwitch
+            checked={settings.launch_at_startup}
+            title="开机自启动"
+            description="登录 Windows 后自动启动 SparkSpeech。"
+            onChange={(checked) => onChange({ ...settings, launch_at_startup: checked })}
+          />
         </div>
         {micTestStatus && <div className="inline-alert neutral"><CheckCircle2 size={16} />{micTestStatus}</div>}
         {micSampleSrc && <audio className="audio-preview" controls src={micSampleSrc} />}
@@ -1237,14 +1313,12 @@ function AppSettingsView({
           <h2>日志</h2>
           <p>保存和查看本地运行日志。</p>
         </div>
-        <label className="toggle-field">
-          <input
-            checked={settings.save_logs}
-            type="checkbox"
-            onChange={(event) => onChange({ ...settings, save_logs: event.currentTarget.checked })}
-          />
-          保存日志
-        </label>
+        <SettingsSwitch
+          checked={settings.save_logs}
+          title="保存日志"
+          description="记录录音、转写、整理和清理过程，方便排查异常。"
+          onChange={(checked) => onChange({ ...settings, save_logs: checked })}
+        />
         <div className="button-row">
           <button className="secondary-button" onClick={loadLogs}>
             查看日志
@@ -1279,24 +1353,56 @@ function AppSettingsView({
 }
 
 function PreferenceSettings({
+  onChange,
   prompts,
   onSave,
 }: {
+  onChange: (prompts: PromptSettings) => void;
   prompts: PromptSettings;
   onSave: (prompts: PromptSettings) => Promise<void>;
 }) {
-  const [draft, setDraft] = useState(prompts);
+  const cleanupMode = prompts.cleanup_mode || "plain";
+
+  async function selectCleanupMode(cleanup_mode: string) {
+    if (cleanup_mode === cleanupMode) return;
+    const next = { ...prompts, cleanup_mode };
+    onChange(next);
+    await onSave(next);
+  }
 
   return (
     <section className="settings-page preference-page">
+      <div className="settings-section">
+        <div className="section-heading">
+          <h2>整理强度</h2>
+          <p>选择额外的整理风格；原话模式只使用基础提示词、词典和个性化偏好。</p>
+        </div>
+        <div className="cleanup-mode-grid" role="radiogroup" aria-label="整理强度">
+          {cleanupModeOptions.map((option) => (
+            <button
+              className={cleanupMode === option.value ? "cleanup-mode-card active" : "cleanup-mode-card"}
+              type="button"
+              role="radio"
+              aria-checked={cleanupMode === option.value}
+              onClick={() => selectCleanupMode(option.value)}
+              key={option.value}
+            >
+              <strong>{option.title}</strong>
+              <span>{option.description}</span>
+              <em>{option.example}</em>
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="settings-section">
         <div className="section-heading">
           <h2>系统提示词</h2>
           <p>决定文本整理器的任务边界。</p>
         </div>
         <textarea
-          value={draft.system_prompt}
-          onChange={(event) => setDraft({ ...draft, system_prompt: event.currentTarget.value })}
+          value={prompts.system_prompt}
+          onChange={(event) => onChange({ ...prompts, system_prompt: event.currentTarget.value })}
         />
       </div>
 
@@ -1306,8 +1412,8 @@ function PreferenceSettings({
           <p>控制分段、标点、空格、公式和表达习惯。</p>
         </div>
         <textarea
-          value={draft.writing_preferences}
-          onChange={(event) => setDraft({ ...draft, writing_preferences: event.currentTarget.value })}
+          value={prompts.writing_preferences}
+          onChange={(event) => onChange({ ...prompts, writing_preferences: event.currentTarget.value })}
         />
       </div>
 
@@ -1318,12 +1424,12 @@ function PreferenceSettings({
         </div>
         <textarea
           className="dictionary-box"
-          value={draft.replacements}
-          onChange={(event) => setDraft({ ...draft, replacements: event.currentTarget.value })}
+          value={prompts.replacements}
+          onChange={(event) => onChange({ ...prompts, replacements: event.currentTarget.value })}
         />
       </div>
 
-      <button className="primary-button save-button" onClick={() => onSave(draft)}>
+      <button className="primary-button save-button" onClick={() => onSave(prompts)}>
         <Wand2 size={18} />
         保存偏好
       </button>
@@ -1346,6 +1452,29 @@ function TextField({
     <label className="text-field">
       <span>{label}</span>
       <input value={value} type={type} onChange={(event) => onChange(event.currentTarget.value)} />
+    </label>
+  );
+}
+
+function SettingsSwitch({
+  checked,
+  description,
+  title,
+  onChange,
+}: {
+  checked: boolean;
+  description: string;
+  title: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="switch-row">
+      <span className="switch-copy">
+        <strong>{title}</strong>
+        <small>{description}</small>
+      </span>
+      <input checked={checked} type="checkbox" onChange={(event) => onChange(event.currentTarget.checked)} />
+      <i aria-hidden="true" />
     </label>
   );
 }
@@ -1401,6 +1530,64 @@ function normalizeModelList(settings: AppSettings) {
   const models = settings.openrouter_models ?? [];
   const selected = settings.openrouter_model.trim();
   return Array.from(new Set([...models, selected].map((model) => model.trim()).filter(Boolean)));
+}
+
+const cleanupModeOptions = [
+  {
+    value: "plain",
+    title: "原话",
+    description: "尽量保留原表达，只做必要识别修正。",
+    example: "保留说话顺序和原本语气。",
+  },
+  {
+    value: "light",
+    title: "轻度整理",
+    description: "清理口头禅、自我修正，并轻度格式化。",
+    example: "适合日常输入和即时发送。",
+  },
+  {
+    value: "deep",
+    title: "深度整理",
+    description: "提取中心意思，整理成更清楚的书面表达。",
+    example: "适合会议、方案和长段想法。",
+  },
+];
+
+function buildTextModelOptions(settings: AppSettings) {
+  const options = normalizeModelList(settings).map((model) => ({
+    value: `openrouter|${model}`,
+    label: `${model} (OpenRouter)`,
+  }));
+  if (settings.deepseek_model.trim()) {
+    options.push({
+      value: `deepseek|${settings.deepseek_model.trim()}`,
+      label: `${settings.deepseek_model.trim()} (DeepSeek)`,
+    });
+  }
+  if (settings.custom_openai_model.trim()) {
+    options.push({
+      value: `custom_openai|${settings.custom_openai_model.trim()}`,
+      label: `${settings.custom_openai_model.trim()} (${settings.custom_openai_provider_name || "Custom"})`,
+    });
+  }
+  return options;
+}
+
+function getActiveTextProviderLabel(settings: AppSettings) {
+  if (settings.optimize_provider === "deepseek") return "DeepSeek";
+  if (settings.optimize_provider === "custom_openai") return settings.custom_openai_provider_name || "Custom";
+  return "OpenRouter";
+}
+
+function getTextProviderKey(provider: string): TextProviderKey {
+  if (provider === "deepseek" || provider === "custom_openai") return provider;
+  return "openrouter";
+}
+
+function getActiveTextModel(settings: AppSettings) {
+  if (settings.optimize_provider === "deepseek") return settings.deepseek_model;
+  if (settings.optimize_provider === "custom_openai") return settings.custom_openai_model;
+  return settings.openrouter_model;
 }
 
 function countTextChars(text: string) {

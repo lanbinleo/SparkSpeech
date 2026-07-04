@@ -9,6 +9,9 @@ pub struct AppSettings {
     pub microphone_name: String,
     pub theme: String,
     pub save_logs: bool,
+    pub launch_at_startup: bool,
+    #[serde(default)]
+    pub show_realtime_transcript: bool,
     pub doubao_auth_mode: String,
     pub doubao_api_key: String,
     pub doubao_app_key: String,
@@ -23,6 +26,14 @@ pub struct AppSettings {
     pub openrouter_http_referer: String,
     pub openrouter_title: String,
     pub use_system_proxy_for_openrouter: bool,
+    pub optimize_provider: String,
+    pub deepseek_api_key: String,
+    pub deepseek_base_url: String,
+    pub deepseek_model: String,
+    pub custom_openai_provider_name: String,
+    pub custom_openai_api_key: String,
+    pub custom_openai_base_url: String,
+    pub custom_openai_model: String,
 }
 
 impl Default for AppSettings {
@@ -34,6 +45,8 @@ impl Default for AppSettings {
             microphone_name: String::new(),
             theme: "system".into(),
             save_logs: true,
+            launch_at_startup: false,
+            show_realtime_transcript: false,
             doubao_auth_mode: "api_key".into(),
             doubao_api_key: String::new(),
             doubao_app_key: String::new(),
@@ -48,6 +61,14 @@ impl Default for AppSettings {
             openrouter_http_referer: String::new(),
             openrouter_title: "SparkSpeech".into(),
             use_system_proxy_for_openrouter: true,
+            optimize_provider: "openrouter".into(),
+            deepseek_api_key: String::new(),
+            deepseek_base_url: "https://api.deepseek.com".into(),
+            deepseek_model: "deepseek-v4-flash".into(),
+            custom_openai_provider_name: "Custom".into(),
+            custom_openai_api_key: String::new(),
+            custom_openai_base_url: String::new(),
+            custom_openai_model: String::new(),
         }
     }
 }
@@ -55,6 +76,8 @@ impl Default for AppSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptSettings {
     pub system_prompt: String,
+    #[serde(default)]
+    pub cleanup_mode: String,
     pub writing_preferences: String,
     pub replacements: String,
 }
@@ -63,6 +86,7 @@ impl Default for PromptSettings {
     fn default() -> Self {
         Self {
             system_prompt: DEFAULT_SYSTEM_PROMPT.trim().into(),
+            cleanup_mode: "plain".into(),
             writing_preferences: DEFAULT_WRITING_PREFERENCES.trim().into(),
             replacements: DEFAULT_REPLACEMENTS.trim().into(),
         }
@@ -108,6 +132,46 @@ impl Default for RecordingSession {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RecordingFileSession {
+    pub id: String,
+    pub started_at: String,
+    pub updated_at: String,
+    pub status: String,
+    pub final_audio_path: Option<String>,
+    pub segments: Vec<RecordingFileSegment>,
+    pub realtime_segments: Vec<RealtimeTranscriptSegment>,
+    pub failed_ranges: Vec<RealtimeFailedRange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RecordingFileSegment {
+    pub index: u32,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RealtimeTranscriptSegment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+    pub definite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RealtimeFailedRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapData {
     pub settings: AppSettings,
@@ -133,6 +197,11 @@ pub struct OverlayState {
     pub elapsed_ms: u64,
     pub input_level: f32,
     pub action_label: Option<String>,
+    pub status_kind: Option<String>,
+    pub transcript_lines: Vec<String>,
+    pub progress_current: Option<u64>,
+    pub progress_total: Option<u64>,
+    pub reconnect_available: bool,
 }
 
 impl Default for OverlayState {
@@ -144,6 +213,11 @@ impl Default for OverlayState {
             elapsed_ms: 0,
             input_level: 0.0,
             action_label: None,
+            status_kind: None,
+            transcript_lines: Vec::new(),
+            progress_current: None,
+            progress_total: None,
+            reconnect_available: false,
         }
     }
 }

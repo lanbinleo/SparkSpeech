@@ -11,7 +11,7 @@ SparkSpeech 是一个给 Leo 自己使用的 Windows 桌面语音输入工具。
 - 用右 Alt 作为主要全局快捷键，触发开始和结束录音。
 - 录音时在屏幕下方显示一个克制的悬浮提示。
 - 使用豆包流式 ASR 获取转写文本。
-- 使用 OpenRouter 的 OpenAI-compatible API 对 ASR 文本做整理。
+- 使用 OpenRouter、DeepSeek 或自定义 OpenAI-compatible API 对 ASR 文本做整理。
 - 在首页展示历史识别结果，并保存原始 ASR、整理后文本和临时录音。
 - 将整理后文本复制到剪贴板，并支持结束录音后自动粘贴。
 - 提供模型配置和自定义 preference 配置。
@@ -49,15 +49,14 @@ Leo 在 preference 页面维护词典和写作习惯，例如英文/数字与中
 右 Alt
   -> 开始录音
   -> 显示底部悬浮提示
-  -> 音频分包发送给豆包流式 ASR
-  -> 接收实时识别文本
+  -> 持续写入本地音频分段
 
 右 Alt 再次按下
   -> 发送最后一包音频
   -> 停止录音
-  -> 保存临时录音
-  -> 得到最终 ASR 文本
-  -> 调用 OpenRouter 整理文本
+  -> 合成本地录音
+  -> 用完整本地音频调用豆包 ASR
+  -> 调用当前文本优化 Provider 整理文本
   -> 保存历史记录
   -> 复制到剪贴板
   -> 按设置决定是否自动粘贴
@@ -80,6 +79,13 @@ Leo 在 preference 页面维护词典和写作习惯，例如英文/数字与中
   - 左侧状态文案：`直接说`
   - 分隔线
   - 右侧音量波形或动态条
+- 0.1.3 将 overlay 状态条横向扩展，优先使用 icon、圆环进度和短状态，尽量减少说明文字。
+- 横向状态条：
+  - 录音中显示录音机 icon。
+  - 录音中右侧显示已录制时长。
+  - 音频分段保存后短暂显示绿色勾 icon，然后回到录音状态。
+  - 正式转写使用圆环显示音频时间进度。
+  - 文本优化使用圆环显示进度，右侧显示已输出字数 / ASR 初稿参考字数。
 - 状态：
   - `idle`：隐藏
   - `recording`：显示录音动效
@@ -130,20 +136,29 @@ Leo 在 preference 页面维护词典和写作习惯，例如英文/数字与中
 
 豆包请求不走系统代理。
 
-#### OpenRouter
+#### 文本优化模型
 
-- API Key
-- Base URL
-  - 默认值：`https://openrouter.ai/api/v1`
-- Model
-  - 默认值待 Leo 确认
-- HTTP-Referer
-  - 可选
-- X-OpenRouter-Title
-  - 建议默认值：`SparkSpeech`
-- 测试调用按钮
-
-OpenRouter 请求默认走系统代理。
+- 顶部默认选择项以“模型”为主，而不是以 Provider 为主。
+- 模型项显示模型名；需要区分来源时，在后面括号显示 Provider。
+- 选择某个模型时，同时确定对应的文本优化 Provider。
+- 支持 OpenRouter、DeepSeek 和自定义 OpenAI-compatible Provider。
+- OpenRouter：
+  - API Key
+  - Base URL，默认值：`https://openrouter.ai/api/v1`
+  - 常用模型列表，可添加、删除并设为当前模型
+  - HTTP-Referer，可选
+  - X-OpenRouter-Title，建议默认值：`SparkSpeech`
+  - 系统代理开关，默认开启
+- DeepSeek：
+  - API Key
+  - Base URL，默认值：`https://api.deepseek.com`
+  - Model，建议默认值：`deepseek-v4-flash`
+- 自定义 OpenAI-compatible：
+  - Provider 名称
+  - API Key
+  - Base URL
+  - Model
+- 测试调用按钮按当前文本模型对应的 Provider 发起请求。
 
 #### 安全
 
@@ -155,9 +170,10 @@ OpenRouter 请求默认走系统代理。
 
 Preference 页面用于维护文本整理偏好，不改变产品边界，不让模型回答问题或执行指令。
 
-配置分为三块：
+配置分为四块：
 
 - 系统整理规则：固定提示词，默认不在 UI 中频繁编辑。
+- 整理强度：三档可选，默认“原话”，只使用基础规则、词典和个性化偏好；“轻度整理”和“深度整理”会额外追加对应的系统提示词。
 - 用户词典：人名、学校、产品名、技术名，以及明确的 `A -> B` ASR 错写替换。
 - 写作习惯：分段、空格、代词、口误、标点读法、公式、脏话保留和插入语处理。
 
@@ -184,7 +200,10 @@ Preference 页面用于维护文本整理偏好，不改变产品边界，不让
 - 整理后文本和原始 ASR 历史长期保存，直到手动删除。
 - 原始录音默认保留 7 天。
 - 录音过期后，记录仍保留，但“重新转写”不可用。
-- 支持手动立即删除某条记录的录音。
+- 删除历史记录时，同时删除该记录对应的本地录音。
+- 启动时清理已过期录音文件，并把历史记录中的 `audio_path` 和 `audio_expires_at` 清空。
+- 录音过程中的分段文件只用于过程保护；正常结束并保存完整 WAV 后，删除对应 recording session 目录。
+- 启动恢复未完成 recording session 后，合成完整 WAV 并删除对应 session 目录。
 - 后续可以提供全局清理入口。
 
 录音文件命名建议：
@@ -199,6 +218,19 @@ recordings/YYYY-MM-DD/{record_id}.wav
 - 设置中提供“整理成功后自动粘贴”开关。
 - 自动粘贴使用 Windows 原生能力模拟 `Ctrl+V`。
 - 自动粘贴失败时，不影响历史保存和剪贴板复制。
+
+### 6.8 0.1.3 录音调度
+
+0.1.3 默认使用完整音频 ASR 调度：
+
+- 录音期间持续保存本地音频分段，保护长录音。
+- 录音期间不做实时上屏。
+- 录音结束后，使用完整本地音频调用豆包 ASR。
+- ASR 完成后进入文本优化。
+- 完整本地音频保留为安全材料，用于失败后手动重新转写。
+- App 启动时扫描未完成 recording session，允许恢复为历史记录并重新转写。
+
+完整计划见 `docs/roadmap.md`。
 
 ## 7. 数据模型
 
@@ -229,18 +261,25 @@ recordings/YYYY-MM-DD/{record_id}.wav
 | global_shortcut | 全局快捷键 |
 | auto_paste | 是否自动粘贴 |
 | recording_retention_days | 录音保留天数 |
+| launch_at_startup | 是否随 Windows 登录自启动 |
 | doubao_resource_id | 豆包 Resource ID |
 | doubao_endpoint | 豆包 WebSocket 地址 |
 | doubao_language | 识别语言 |
+| optimize_provider | 当前文本优化 Provider |
 | openrouter_base_url | OpenRouter Base URL |
 | openrouter_model | OpenRouter 模型 |
 | use_system_proxy_for_openrouter | OpenRouter 是否走系统代理 |
+| deepseek_base_url | DeepSeek Base URL |
+| deepseek_model | DeepSeek 模型 |
+| custom_openai_base_url | 自定义 OpenAI-compatible Base URL |
+| custom_openai_model | 自定义 OpenAI-compatible 模型 |
 
 ### 7.3 Preference
 
 | 字段 | 说明 |
 | --- | --- |
 | system_prompt | 固定整理规则 |
+| cleanup_mode | 整理强度，默认 `plain` |
 | user_dictionary | 用户词典 |
 | writing_preferences | 写作习惯 |
 | updated_at | 更新时间 |
@@ -289,18 +328,19 @@ recordings/YYYY-MM-DD/{record_id}.wav
 
 ### 8.3 文本整理
 
-参考 `docs/references/openrouter-api.md`：
+参考 `docs/references/openrouter-api.md`。OpenRouter、DeepSeek 和自定义 Provider 都走 OpenAI-compatible chat completions：
 
 - Endpoint：`POST /api/v1/chat/completions`
 - 支持 OpenAI-compatible 请求格式。
 - 请求头包含 `Authorization: Bearer <OPENROUTER_API_KEY>`。
-- 可选请求头：`HTTP-Referer`、`X-OpenRouter-Title`。
+- OpenRouter 可选请求头：`HTTP-Referer`、`X-OpenRouter-Title`。
 
 ### 8.4 本地存储
 
 - SQLite 保存历史记录、设置索引和处理状态。
 - 录音文件保存在应用数据目录。
 - 密钥使用 Windows 系统能力或本地加密存储。
+- 开启保存日志后，`app.log` 记录录音、ASR、文本优化、文件保存、清理和备份等关键动作；日志包含任务 ID、模型信息、文本长度、音频时长和本地文件路径。
 
 ## 9. 界面设计方向
 
@@ -346,10 +386,12 @@ recordings/YYYY-MM-DD/{record_id}.wav
 - 全局快捷键注册失败。
 - 豆包鉴权失败。
 - 豆包 WebSocket 连接失败。
-- OpenRouter API Key 无效。
-- OpenRouter 代理不可用。
+- 豆包 WebSocket 录音中断开。
+- 文本优化 Provider API Key 无效。
+- 文本优化 Provider Base URL、模型名或代理不可用。
 - 剪贴板写入失败。
 - 自动粘贴失败。
+- App 闪退或电脑断电导致 recording session 未完成。
 
 错误展示原则：
 
@@ -367,14 +409,14 @@ recordings/YYYY-MM-DD/{record_id}.wav
 4. 悬浮录音提示。
 5. 麦克风录音和本地临时保存。
 6. 豆包流式 ASR。
-7. OpenRouter 文本整理。
+7. OpenAI-compatible 文本整理。
 8. 历史记录保存。
 9. 复制到剪贴板。
 10. 自动粘贴开关。
 
 ## 12. 待确认事项
 
-- OpenRouter 默认模型。
+- 默认文本优化 Provider 和模型。
 - 录音默认保留时间是否使用 7 天。
 - 自动粘贴是否默认开启。
 - Preference 是否需要版本历史。

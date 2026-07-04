@@ -4,6 +4,7 @@ use flate2::{write::GzEncoder, Compression};
 use futures_util::{future::try_join, SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{
     connect_async,
@@ -19,16 +20,496 @@ use crate::{
 const DOUBAO_AUDIO_CHUNK_MS: usize = 200;
 const DOUBAO_FAST_SEND_DELAY_MS: u64 = 10;
 
+pub struct RealtimeAudioChunk {
+    pub pcm_16k: Vec<i16>,
+    pub next_sample_index: usize,
+    pub end_ms: u64,
+    pub send_delay_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DoubaoUtterance {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+    pub definite: bool,
+}
+
 pub async fn transcribe_audio(
     settings: &AppSettings,
     audio_path: &Path,
 ) -> Result<(String, Option<String>, String), String> {
+    transcribe_audio_with_progress(settings, audio_path, |_current_ms, _total_ms| {}).await
+}
+
+pub async fn transcribe_audio_with_progress<F>(
+    settings: &AppSettings,
+    audio_path: &Path,
+    mut on_progress: F,
+) -> Result<(String, Option<String>, String), String>
+where
+    F: FnMut(u64, u64) + Send,
+{
     let pcm = read_wav_pcm_16k(audio_path)?;
     if pcm.is_empty() {
         return Err("录音文件为空".to_string());
     }
+    let total_ms = (pcm.len() as u64 * 1000) / 16_000;
 
     let request_id = Uuid::new_v4().to_string();
+    let request = build_doubao_request(settings, &request_id)?;
+
+    let (ws, response) = connect_async(request).await.map_err(|error| {
+        let message = error.to_string();
+        if message.contains("401") || message.contains("Unauthorized") {
+            format!(
+                "豆包鉴权失败：HTTP 401 Unauthorized。请检查鉴权方式、API Key/App Key/Access Key 和 Resource ID 是否来自同一个控制台项目。原始错误：{message}"
+            )
+        } else {
+            message
+        }
+    })?;
+    let log_id = response
+        .headers()
+        .get("X-Tt-Logid")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+
+    let init_payload = doubao_init_payload(settings);
+
+    let (mut write, mut read) = ws.split();
+    let reader = async move {
+        let mut latest_text = String::new();
+        while let Some(message) = read.next().await {
+            let message = message.map_err(|error| error.to_string())?;
+            let Message::Binary(data) = message else {
+                continue;
+            };
+            let response = parse_server_frame(data.as_ref())?;
+            if let Some(text) = response.text {
+                if !text.trim().is_empty() {
+                    latest_text = text;
+                }
+            }
+            if response.is_last {
+                break;
+            }
+        }
+        Ok::<String, String>(latest_text)
+    };
+
+    let writer = async move {
+        write
+            .send(Message::Binary(
+                build_frame(
+                    MessageKind::FullClientRequest,
+                    false,
+                    Serialization::Json,
+                    CompressionFlag::Gzip,
+                    &gzip(serde_json::to_vec(&init_payload).map_err(|error| error.to_string())?)?,
+                )
+                .into(),
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let bytes = pcm
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        let chunk_size = 16_000 * 2 * DOUBAO_AUDIO_CHUNK_MS / 1000;
+        let mut chunks = bytes.chunks(chunk_size).peekable();
+        let mut sent_bytes = 0_usize;
+        while let Some(chunk) = chunks.next() {
+            let is_last = chunks.peek().is_none();
+            write
+                .send(Message::Binary(
+                    build_frame(
+                        MessageKind::AudioOnlyRequest,
+                        is_last,
+                        Serialization::None,
+                        CompressionFlag::Gzip,
+                        &gzip(chunk.to_vec())?,
+                    )
+                    .into(),
+                ))
+                .await
+                .map_err(|error| error.to_string())?;
+            sent_bytes += chunk.len();
+            let current_ms = ((sent_bytes / 2) as u64 * 1000 / 16_000).min(total_ms);
+            on_progress(current_ms, total_ms);
+            if !is_last {
+                sleep(Duration::from_millis(DOUBAO_FAST_SEND_DELAY_MS)).await;
+            }
+        }
+        Ok::<(), String>(())
+    };
+
+    let (_, latest_text) = try_join(writer, reader).await?;
+
+    Ok((latest_text, log_id, request_id))
+}
+
+pub async fn transcribe_audio_stream<F, G>(
+    settings: AppSettings,
+    mut receiver: mpsc::Receiver<RealtimeAudioChunk>,
+    send_delay_ms: u64,
+    mut on_text: F,
+    mut on_sent: G,
+) -> Result<(), String>
+where
+    F: FnMut(String, Vec<DoubaoUtterance>) + Send + 'static,
+    G: FnMut(usize, u64) + Send + 'static,
+{
+    let request_id = Uuid::new_v4().to_string();
+    let request = build_doubao_request(&settings, &request_id)?;
+    let (ws, _) = connect_async(request).await.map_err(|error| {
+        let message = error.to_string();
+        if message.contains("401") || message.contains("Unauthorized") {
+            format!(
+                "豆包鉴权失败：HTTP 401 Unauthorized。请检查鉴权方式、API Key/App Key/Access Key 和 Resource ID 是否来自同一个控制台项目。原始错误：{message}"
+            )
+        } else {
+            message
+        }
+    })?;
+    let init_payload = doubao_init_payload(&settings);
+    let (mut write, mut read) = ws.split();
+
+    let reader = async move {
+        while let Some(message) = read.next().await {
+            let message = message.map_err(|error| error.to_string())?;
+            let Message::Binary(data) = message else {
+                continue;
+            };
+            let response = parse_server_frame(data.as_ref())?;
+            if let Some(text) = response.text {
+                if !text.trim().is_empty() {
+                    on_text(text, response.utterances);
+                }
+            }
+            if response.is_last {
+                break;
+            }
+        }
+        Ok::<(), String>(())
+    };
+
+    let writer = async move {
+        write
+            .send(Message::Binary(
+                build_frame(
+                    MessageKind::FullClientRequest,
+                    false,
+                    Serialization::Json,
+                    CompressionFlag::Gzip,
+                    &gzip(serde_json::to_vec(&init_payload).map_err(|error| error.to_string())?)?,
+                )
+                .into(),
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let Some(mut current) = receiver.recv().await else {
+            return Ok::<(), String>(());
+        };
+        while let Some(next) = receiver.recv().await {
+            write
+                .send(build_audio_message_from_pcm(&current.pcm_16k, false)?)
+                .await
+                .map_err(|error| error.to_string())?;
+            on_sent(current.next_sample_index, current.end_ms);
+            let delay_ms = if current.send_delay_ms == 0 {
+                send_delay_ms
+            } else {
+                current.send_delay_ms
+            };
+            sleep(Duration::from_millis(delay_ms)).await;
+            current = next;
+        }
+        write
+            .send(build_audio_message_from_pcm(&current.pcm_16k, true)?)
+            .await
+            .map_err(|error| error.to_string())?;
+        on_sent(current.next_sample_index, current.end_ms);
+        Ok::<(), String>(())
+    };
+
+    try_join(writer, reader).await?;
+    Ok(())
+}
+
+pub async fn optimize_text(
+    settings: &AppSettings,
+    prompts: &PromptSettings,
+    raw_asr_text: &str,
+) -> Result<String, String> {
+    let provider = active_text_provider(settings)?;
+
+    let mut client_builder = reqwest::Client::builder();
+    if !provider.use_system_proxy {
+        client_builder = client_builder.no_proxy();
+    }
+    let client = client_builder.build().map_err(|error| error.to_string())?;
+
+    let url = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
+    let system_prompt = build_system_prompt(prompts);
+
+    let mut request = client
+        .post(url)
+        .bearer_auth(&provider.api_key)
+        .json(&json!({
+            "model": provider.model,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": format!("ASR 原文：\n{raw_asr_text}") }
+            ]
+        }));
+
+    if let Some(title) = provider.title.filter(|value| !value.trim().is_empty()) {
+        request = request.header("X-OpenRouter-Title", title);
+    }
+    if let Some(referer) = provider.referer.filter(|value| !value.trim().is_empty()) {
+        request = request.header("HTTP-Referer", referer);
+    } else if !settings.openrouter_http_referer.trim().is_empty() {
+        request = request.header("HTTP-Referer", &settings.openrouter_http_referer);
+    }
+
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("{} 请求失败：{status} {text}", provider.name));
+    }
+
+    let body = response
+        .json::<OpenRouterResponse>()
+        .await
+        .map_err(|error| error.to_string())?;
+    body.choices
+        .into_iter()
+        .next()
+        .map(|choice| choice.message.content.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| format!("{} 没有返回可用文本", provider.name))
+}
+
+pub async fn optimize_text_streaming<F>(
+    settings: &AppSettings,
+    prompts: &PromptSettings,
+    raw_asr_text: &str,
+    mut on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(String) + Send,
+{
+    let provider = active_text_provider(settings)?;
+
+    let mut client_builder = reqwest::Client::builder();
+    if !provider.use_system_proxy {
+        client_builder = client_builder.no_proxy();
+    }
+    let client = client_builder.build().map_err(|error| error.to_string())?;
+
+    let url = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
+    let system_prompt = build_system_prompt(prompts);
+
+    let mut request = client
+        .post(url)
+        .bearer_auth(&provider.api_key)
+        .json(&json!({
+            "model": provider.model,
+            "stream": true,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": format!("ASR 原文：\n{raw_asr_text}") }
+            ]
+        }));
+
+    if let Some(title) = provider.title.filter(|value| !value.trim().is_empty()) {
+        request = request.header("X-OpenRouter-Title", title);
+    }
+    if let Some(referer) = provider.referer.filter(|value| !value.trim().is_empty()) {
+        request = request.header("HTTP-Referer", referer);
+    }
+
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("{} 请求失败：{status} {text}", provider.name));
+    }
+
+    let mut output = String::new();
+    let mut pending = String::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(index) = pending.find('\n') {
+            let line = pending[..index].trim().to_string();
+            pending = pending[index + 1..].to_string();
+            if !line.starts_with("data:") {
+                continue;
+            }
+            let data = line.trim_start_matches("data:").trim();
+            if data == "[DONE]" {
+                return Ok(output.trim().to_string());
+            }
+            let parsed: OpenRouterStreamResponse =
+                serde_json::from_str(data).map_err(|error| error.to_string())?;
+            for choice in parsed.choices {
+                if let Some(content) = choice.delta.content {
+                    output.push_str(&content);
+                    on_progress(output.clone());
+                }
+            }
+        }
+    }
+
+    let output = output.trim().to_string();
+    if output.is_empty() {
+        Err(format!("{} 没有返回可用文本", provider.name))
+    } else {
+        Ok(output)
+    }
+}
+
+pub async fn test_openrouter(settings: &AppSettings) -> Result<String, String> {
+    let provider = active_text_provider(settings)?;
+
+    let mut client_builder = reqwest::Client::builder();
+    if !provider.use_system_proxy {
+        client_builder = client_builder.no_proxy();
+    }
+    let client = client_builder.build().map_err(|error| error.to_string())?;
+    let url = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
+
+    let mut request = client
+        .post(url)
+        .bearer_auth(&provider.api_key)
+        .json(&json!({
+            "model": provider.model,
+            "messages": [
+                { "role": "user", "content": "ping" }
+            ],
+            "max_tokens": 4
+        }));
+
+    if let Some(title) = provider.title.filter(|value| !value.trim().is_empty()) {
+        request = request.header("X-OpenRouter-Title", title);
+    }
+    if let Some(referer) = provider.referer.filter(|value| !value.trim().is_empty()) {
+        request = request.header("HTTP-Referer", referer);
+    }
+
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("{} 测试失败：{status} {text}", provider.name));
+    }
+
+    Ok(format!("{} 连接可用", provider.name))
+}
+
+struct TextProvider {
+    name: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+    title: Option<String>,
+    referer: Option<String>,
+    use_system_proxy: bool,
+}
+
+fn active_text_provider(settings: &AppSettings) -> Result<TextProvider, String> {
+    let provider = match settings.optimize_provider.as_str() {
+        "deepseek" => TextProvider {
+            name: "DeepSeek".into(),
+            api_key: settings.deepseek_api_key.clone(),
+            base_url: settings.deepseek_base_url.clone(),
+            model: settings.deepseek_model.clone(),
+            title: None,
+            referer: None,
+            use_system_proxy: true,
+        },
+        "custom_openai" => TextProvider {
+            name: if settings.custom_openai_provider_name.trim().is_empty() {
+                "Custom OpenAI-compatible".into()
+            } else {
+                settings.custom_openai_provider_name.clone()
+            },
+            api_key: settings.custom_openai_api_key.clone(),
+            base_url: settings.custom_openai_base_url.clone(),
+            model: settings.custom_openai_model.clone(),
+            title: None,
+            referer: None,
+            use_system_proxy: true,
+        },
+        _ => TextProvider {
+            name: "OpenRouter".into(),
+            api_key: settings.openrouter_api_key.clone(),
+            base_url: settings.openrouter_base_url.clone(),
+            model: settings.openrouter_model.clone(),
+            title: Some(settings.openrouter_title.clone()),
+            referer: Some(settings.openrouter_http_referer.clone()),
+            use_system_proxy: settings.use_system_proxy_for_openrouter,
+        },
+    };
+
+    if provider.api_key.trim().is_empty() {
+        return Err(format!("{} API Key 为空", provider.name));
+    }
+    if provider.base_url.trim().is_empty() {
+        return Err(format!("{} Base URL 为空", provider.name));
+    }
+    if provider.model.trim().is_empty() {
+        return Err(format!("{} 模型为空", provider.name));
+    }
+    Ok(provider)
+}
+
+fn build_system_prompt(prompts: &PromptSettings) -> String {
+    let cleanup_prompt = cleanup_mode_prompt(&prompts.cleanup_mode);
+    let mut parts = vec![prompts.system_prompt.trim().to_string()];
+    if !cleanup_prompt.is_empty() {
+        parts.push(format!("# 整理强度\n{cleanup_prompt}"));
+    }
+    parts.push(format!("# 用户词典\n{}", prompts.replacements.trim()));
+    parts.push(format!(
+        "# 个性化偏好\n{}",
+        prompts.writing_preferences.trim()
+    ));
+    parts.join("\n\n")
+}
+
+fn cleanup_mode_prompt(mode: &str) -> &'static str {
+    match mode {
+        "light" => {
+            "【轻度整理】\n保留原表达逻辑，只清理明显口语噪音、紧邻重复、明确自我修正和明显 ASR 错误。允许按自然语义轻度换行，但不总结、不扩写、不重排结构。"
+        }
+        "deep" => {
+            "【深度整理】\n提取中心意思，删除口癖和重复表达，重组语序和结构；遇到明确列举、步骤、条件或任务时优先使用编号列表。不得新增事实、回答问题或给建议。"
+        }
+        _ => "",
+    }
+}
+
+fn build_doubao_request(
+    settings: &AppSettings,
+    request_id: &str,
+) -> Result<http::Request<()>, String> {
     let mut request = settings
         .doubao_endpoint
         .as_str()
@@ -87,24 +568,11 @@ pub async fn transcribe_audio(
             .map_err(|error| format!("豆包 Connect ID 请求头无效：{error}"))?,
     );
     headers.insert("X-Api-Sequence", "-1".parse().unwrap());
+    Ok(request)
+}
 
-    let (ws, response) = connect_async(request).await.map_err(|error| {
-        let message = error.to_string();
-        if message.contains("401") || message.contains("Unauthorized") {
-            format!(
-                "豆包鉴权失败：HTTP 401 Unauthorized。请检查鉴权方式、API Key/App Key/Access Key 和 Resource ID 是否来自同一个控制台项目。原始错误：{message}"
-            )
-        } else {
-            message
-        }
-    })?;
-    let log_id = response
-        .headers()
-        .get("X-Tt-Logid")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_string());
-
-    let init_payload = json!({
+fn doubao_init_payload(settings: &AppSettings) -> Value {
+    json!({
         "user": {
             "uid": "sparkspeech"
         },
@@ -124,177 +592,24 @@ pub async fn transcribe_audio(
             "show_utterances": true,
             "result_type": "full"
         }
-    });
-
-    let (mut write, mut read) = ws.split();
-    let reader = async move {
-        let mut latest_text = String::new();
-        while let Some(message) = read.next().await {
-            let message = message.map_err(|error| error.to_string())?;
-            let Message::Binary(data) = message else {
-                continue;
-            };
-            let response = parse_server_frame(data.as_ref())?;
-            if let Some(text) = response.text {
-                if !text.trim().is_empty() {
-                    latest_text = text;
-                }
-            }
-            if response.is_last {
-                break;
-            }
-        }
-        Ok::<String, String>(latest_text)
-    };
-
-    let writer = async move {
-        write
-            .send(Message::Binary(
-                build_frame(
-                    MessageKind::FullClientRequest,
-                    false,
-                    Serialization::Json,
-                    CompressionFlag::Gzip,
-                    &gzip(serde_json::to_vec(&init_payload).map_err(|error| error.to_string())?)?,
-                )
-                .into(),
-            ))
-            .await
-            .map_err(|error| error.to_string())?;
-
-        let bytes = pcm
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect::<Vec<_>>();
-        let chunk_size = 16_000 * 2 * DOUBAO_AUDIO_CHUNK_MS / 1000;
-        let mut chunks = bytes.chunks(chunk_size).peekable();
-        while let Some(chunk) = chunks.next() {
-            let is_last = chunks.peek().is_none();
-            write
-                .send(Message::Binary(
-                    build_frame(
-                        MessageKind::AudioOnlyRequest,
-                        is_last,
-                        Serialization::None,
-                        CompressionFlag::Gzip,
-                        &gzip(chunk.to_vec())?,
-                    )
-                    .into(),
-                ))
-                .await
-                .map_err(|error| error.to_string())?;
-            if !is_last {
-                sleep(Duration::from_millis(DOUBAO_FAST_SEND_DELAY_MS)).await;
-            }
-        }
-        Ok::<(), String>(())
-    };
-
-    let (_, latest_text) = try_join(writer, reader).await?;
-
-    Ok((latest_text, log_id, request_id))
+    })
 }
 
-pub async fn optimize_text(
-    settings: &AppSettings,
-    prompts: &PromptSettings,
-    raw_asr_text: &str,
-) -> Result<String, String> {
-    if settings.openrouter_api_key.trim().is_empty() {
-        return Err("OpenRouter API Key 为空".to_string());
-    }
-
-    let mut client_builder = reqwest::Client::builder();
-    if !settings.use_system_proxy_for_openrouter {
-        client_builder = client_builder.no_proxy();
-    }
-    let client = client_builder.build().map_err(|error| error.to_string())?;
-
-    let url = format!(
-        "{}/chat/completions",
-        settings.openrouter_base_url.trim_end_matches('/')
-    );
-    let system_prompt = format!(
-        "{}\n\n# 用户词典\n{}\n\n# 个性化偏好\n{}",
-        prompts.system_prompt.trim(),
-        prompts.replacements.trim(),
-        prompts.writing_preferences.trim()
-    );
-
-    let mut request = client
-        .post(url)
-        .bearer_auth(&settings.openrouter_api_key)
-        .header("X-OpenRouter-Title", &settings.openrouter_title)
-        .json(&json!({
-            "model": settings.openrouter_model,
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": format!("ASR 原文：\n{raw_asr_text}") }
-            ]
-        }));
-
-    if !settings.openrouter_http_referer.trim().is_empty() {
-        request = request.header("HTTP-Referer", &settings.openrouter_http_referer);
-    }
-
-    let response = request.send().await.map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("OpenRouter 请求失败：{status} {text}"));
-    }
-
-    let body = response
-        .json::<OpenRouterResponse>()
-        .await
-        .map_err(|error| error.to_string())?;
-    body.choices
-        .into_iter()
-        .next()
-        .map(|choice| choice.message.content.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| "OpenRouter 没有返回可用文本".to_string())
-}
-
-pub async fn test_openrouter(settings: &AppSettings) -> Result<String, String> {
-    if settings.openrouter_api_key.trim().is_empty() {
-        return Err("OpenRouter API Key 为空".to_string());
-    }
-
-    let mut client_builder = reqwest::Client::builder();
-    if !settings.use_system_proxy_for_openrouter {
-        client_builder = client_builder.no_proxy();
-    }
-    let client = client_builder.build().map_err(|error| error.to_string())?;
-    let url = format!(
-        "{}/chat/completions",
-        settings.openrouter_base_url.trim_end_matches('/')
-    );
-
-    let mut request = client
-        .post(url)
-        .bearer_auth(&settings.openrouter_api_key)
-        .header("X-OpenRouter-Title", &settings.openrouter_title)
-        .json(&json!({
-            "model": settings.openrouter_model,
-            "messages": [
-                { "role": "user", "content": "ping" }
-            ],
-            "max_tokens": 4
-        }));
-
-    if !settings.openrouter_http_referer.trim().is_empty() {
-        request = request.header("HTTP-Referer", &settings.openrouter_http_referer);
-    }
-
-    let response = request.send().await.map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("OpenRouter 测试失败：{status} {text}"));
-    }
-
-    Ok("OpenRouter 连接可用".to_string())
+fn build_audio_message_from_pcm(pcm_16k: &[i16], is_last: bool) -> Result<Message, String> {
+    let bytes = pcm_16k
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect::<Vec<_>>();
+    Ok(Message::Binary(
+        build_frame(
+            MessageKind::AudioOnlyRequest,
+            is_last,
+            Serialization::None,
+            CompressionFlag::Gzip,
+            &gzip(bytes)?,
+        )
+        .into(),
+    ))
 }
 
 enum MessageKind {
@@ -313,6 +628,7 @@ enum CompressionFlag {
 
 struct ParsedServerFrame {
     text: Option<String>,
+    utterances: Vec<DoubaoUtterance>,
     is_last: bool,
 }
 
@@ -399,8 +715,10 @@ fn parse_server_frame(data: &[u8]) -> Result<ParsedServerFrame, String> {
     };
 
     let parsed: Value = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
+    let utterances = extract_doubao_utterances(&parsed);
     Ok(ParsedServerFrame {
         text: extract_doubao_text(&parsed),
+        utterances,
         is_last: flags == 0b0010 || flags == 0b0011,
     })
 }
@@ -470,6 +788,52 @@ fn collect_utterance_text(value: Option<&Value>, parts: &mut Vec<String>) {
     }
 }
 
+fn extract_doubao_utterances(value: &Value) -> Vec<DoubaoUtterance> {
+    let mut output = Vec::new();
+    if let Some(result) = value.get("result") {
+        collect_utterances(result.get("utterances"), &mut output);
+        if let Some(items) = result.as_array() {
+            for item in items {
+                collect_utterances(item.get("utterances"), &mut output);
+            }
+        }
+    }
+    output
+}
+
+fn collect_utterances(value: Option<&Value>, output: &mut Vec<DoubaoUtterance>) {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return;
+    };
+
+    for item in items {
+        let Some(text) = item.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        output.push(DoubaoUtterance {
+            start_ms: json_u64(item.get("start_time")).unwrap_or(0),
+            end_ms: json_u64(item.get("end_time")).unwrap_or(0),
+            text: text.to_string(),
+            definite: item
+                .get("definite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+}
+
+fn json_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+    })
+}
+
 fn parse_error_frame(data: &[u8], mut cursor: usize) -> String {
     if data.len() < cursor + 8 {
         return "豆包返回错误，但错误帧不完整".to_string();
@@ -506,4 +870,19 @@ struct OpenRouterChoice {
 #[derive(Debug, Deserialize)]
 struct OpenRouterMessage {
     content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterStreamResponse {
+    choices: Vec<OpenRouterStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterStreamChoice {
+    delta: OpenRouterDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterDelta {
+    content: Option<String>,
 }

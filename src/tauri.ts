@@ -7,6 +7,8 @@ export type AppSettings = {
   microphone_name: string;
   theme: string;
   save_logs: boolean;
+  launch_at_startup: boolean;
+  show_realtime_transcript: boolean;
   doubao_auth_mode: string;
   doubao_api_key: string;
   doubao_app_key: string;
@@ -21,10 +23,19 @@ export type AppSettings = {
   openrouter_http_referer: string;
   openrouter_title: string;
   use_system_proxy_for_openrouter: boolean;
+  optimize_provider: string;
+  deepseek_api_key: string;
+  deepseek_base_url: string;
+  deepseek_model: string;
+  custom_openai_provider_name: string;
+  custom_openai_api_key: string;
+  custom_openai_base_url: string;
+  custom_openai_model: string;
 };
 
 export type PromptSettings = {
   system_prompt: string;
+  cleanup_mode: string;
   writing_preferences: string;
   replacements: string;
 };
@@ -70,6 +81,11 @@ export type OverlayState = {
   elapsed_ms: number;
   input_level: number;
   action_label?: string | null;
+  status_kind?: string | null;
+  transcript_lines: string[];
+  progress_current?: number | null;
+  progress_total?: number | null;
+  reconnect_available: boolean;
 };
 
 export type BootstrapData = {
@@ -128,6 +144,8 @@ const fallback: BootstrapData = {
     microphone_name: "",
     theme: "system",
     save_logs: true,
+    launch_at_startup: false,
+    show_realtime_transcript: false,
     doubao_auth_mode: "api_key",
     doubao_api_key: "",
     doubao_app_key: "",
@@ -142,9 +160,18 @@ const fallback: BootstrapData = {
     openrouter_http_referer: "",
     openrouter_title: "SparkSpeech",
     use_system_proxy_for_openrouter: true,
+    optimize_provider: "openrouter",
+    deepseek_api_key: "",
+    deepseek_base_url: "https://api.deepseek.com",
+    deepseek_model: "deepseek-v4-flash",
+    custom_openai_provider_name: "Custom",
+    custom_openai_api_key: "",
+    custom_openai_base_url: "",
+    custom_openai_model: "",
   },
   prompts: {
     system_prompt: defaultSystemPrompt,
+    cleanup_mode: "plain",
     writing_preferences: defaultWritingPreferences,
     replacements: defaultReplacements,
   },
@@ -209,6 +236,11 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
       elapsed_ms: 0,
       input_level: 0,
       action_label: null,
+      status_kind: null,
+      transcript_lines: [],
+      progress_current: null,
+      progress_total: null,
+      reconnect_available: false,
     } as T;
   }
 
@@ -216,7 +248,7 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
     return "" as T;
   }
 
-  if (command === "open_audio_folder" || command === "open_main_window") {
+  if (command === "open_audio_folder" || command === "open_main_window" || command === "reconnect_realtime_asr") {
     return true as T;
   }
 
@@ -241,7 +273,7 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
   }
 
   if (command === "test_openrouter") {
-    return "OpenRouter 连接可用。" as T;
+    return "文本优化 Provider 连接可用。" as T;
   }
 
   if (command === "copy_text") {

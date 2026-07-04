@@ -23,7 +23,7 @@
 - 麦克风录音并保存为 16k mono WAV。
 - 录音失败或网络失败时保留音频文件和失败记录。
 - 豆包 `bigmodel_async` WebSocket ASR 请求。
-- OpenRouter `/api/v1/chat/completions` 文本整理请求。
+- OpenAI-compatible `/chat/completions` 文本整理请求。
 - 历史记录分页加载，一次 60 条。
 - 历史记录操作：
   - 复制
@@ -43,16 +43,37 @@
 - 新增独立设置页：
   - 麦克风选择
   - 快捷键录制式设置
+  - 开机自启动
   - 浅色 / 深色 / 跟随系统主题
   - 保存日志
   - 查看日志
+- 运行日志增强为中文任务记录，覆盖录音开始/保存、ASR 调用、文本优化、输出长度、文件路径、备份和清理动作。
 - 录音会使用设置页中选择的麦克风。
+- 整理成功后复制到剪贴板，并按设置决定是否自动粘贴。
+- 支持拖放 WAV 音频到主窗口导入，导入后按正常录音流程转写和优化。
+- 豆包长录音改为发送音频时同步读取 WebSocket 返回，避免等待下一包超时。
+- 文本优化 Provider 支持 OpenRouter、DeepSeek 和自定义 OpenAI-compatible 配置。
+- 0.1.3 输入可靠性与可见反馈：
+  - 录音过程中每 10 秒保存本地音频分段。
+  - 启动时恢复未完成的 recording session。
+  - 正常结束或恢复完成后删除 recording session 分段目录。
+  - 启动时清理过期录音文件，保留文字历史。
+  - 删除历史记录时同步删除对应录音文件。
+  - 录音期间不做实时上屏。
+  - overlay 状态条使用录音、保存成功和处理进度 icon。
+  - 录音阶段显示已录制时长。
+  - 正常录音结束后，使用完整本地音频调用豆包 ASR。
+  - 正式 ASR 阶段使用圆环显示音频时间进度。
+  - 文本优化阶段使用 streaming 输出，并用圆环和字数显示进度。
+- 模型配置页顶部改为按模型选择当前文本优化模型，Provider 作为模型来源显示。
+- Preference 增加整理强度选择，当前支持原话、轻度整理和深度整理，默认原话。
 
 ## Preference 结构
 
-Preference 已经按 Leo 的要求分成三块：
+Preference 已经按 Leo 的要求分成四块：
 
 - 系统提示词：可编辑，有默认值。
+- 整理强度：三张卡片选择，默认原话，只追加对应风格的系统提示词。
 - 个性化偏好：可编辑，有默认值。
 - 词条替换：单独文本框，一行一个词，也支持 `A → B`。
 
@@ -60,10 +81,12 @@ Preference 已经按 Leo 的要求分成三块：
 
 - 豆包鉴权头和 `Resource ID` 是否与当前账号一致。
 - 豆包返回帧在当前模型版本下的最终包标识。
-- OpenRouter 是否能按系统代理访问。
+- 当前文本优化 Provider 是否能按网络环境访问。
 - 右 Alt 在 Leo 当前键盘布局下是否会被系统或其他软件拦截。
 - 麦克风设备默认采样配置是否正常。
-- 自动粘贴尚未实现，本版仍然只复制到剪贴板。
+- 自动粘贴在真实目标应用中的表现，包括焦点、权限和快捷键冲突。
+- 0.1.3 未完成录音恢复和 overlay 进度仍需在真实 Windows 桌面录音场景下复测。
+- 开机自启动需要在真实 Windows 登录流程中复测。
 
 ## 本地数据
 
@@ -81,26 +104,12 @@ Preference 已经按 Leo 的要求分成三块：
 
 ```text
 npm run build
-cargo check
-npm run tauri:build -- --no-bundle
+cargo check --manifest-path src-tauri/Cargo.toml
 ```
-
-Tauri 构建已生成：
-
-- `src-tauri/target/release/sparkspeech.exe`
-- `src-tauri/target/release/bundle/msi/SparkSpeech_0.1.0_x64_en-US.msi`
-- `src-tauri/target/release/bundle/nsis/SparkSpeech_0.1.0_x64-setup.exe`
-
-已用 Playwright 检查页面：
-
-- `output/playwright/home-recording.png`
-- `output/playwright/models.png`
-- `output/playwright/preferences.png`
 
 ## 下一步
 
-1. 和 Leo 一起实测一次真实录音、豆包 ASR、OpenRouter 优化。
-2. 根据真实返回帧调整豆包协议解析。
-3. 实现自动粘贴。
-4. 将 API Key 从普通 JSON 迁移到本地加密或 Windows 凭据。
-5. 将历史记录从 JSON 迁移到 SQLite。
+1. 在真实 Windows 桌面环境复测 overlay 位置、ASR 进度、优化进度和未完成录音恢复。
+2. 增加每日数据备份，默认保留 7 天。
+3. 后续将 API Key 从普通 JSON 迁移到本地加密或 Windows 凭据。
+4. 后续将历史记录从 JSON 迁移到 SQLite。
