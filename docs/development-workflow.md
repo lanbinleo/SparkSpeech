@@ -127,13 +127,13 @@ After regenerating the key, update the `plugins.updater.pubkey` value in `src-ta
 5. Run:
 
 ```powershell
-npm run release:check -- -Version 0.1.1
+npm run release:check -- 0.1.1
 ```
 
 6. For local installer verification, run:
 
 ```powershell
-npm run release:check -- -Version 0.1.1 -BuildInstaller
+npm run release:check -- 0.1.1 -BuildInstaller
 ```
 
 7. Review the diff.
@@ -144,7 +144,7 @@ npm run release:check -- -Version 0.1.1 -BuildInstaller
 ```powershell
 git checkout main
 git pull
-npm run release:check -- -Version 0.1.1 -Tag -PushTag
+npm run release:check -- 0.1.1 -Tag -PushTag
 ```
 
 11. GitHub Actions runs `.github/workflows/release.yml`.
@@ -162,7 +162,7 @@ npm run release:check -- -Version 0.1.1 -Tag -PushTag
 Use this only for local artifact verification:
 
 ```powershell
-npm run release:check -- -Version 0.1.1 -BuildInstaller
+npm run release:check -- 0.1.1 -BuildInstaller
 ```
 
 The local build should create installers under `src-tauri\target\release\bundle\`.
