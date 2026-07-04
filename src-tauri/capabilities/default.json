@@ -7,6 +7,8 @@
     "overlay"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "updater:default",
+    "process:default"
   ]
 }

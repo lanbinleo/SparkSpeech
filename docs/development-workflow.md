@@ -92,9 +92,33 @@ When bumping a release, update these together:
 - `src-tauri/tauri.conf.json`
 - `docs/release-x.y.z.md`
 
-The visible product version should remain `0.1.0` until the next release is intentionally prepared.
+The visible product version should match the release being prepared.
 
-## Release Checklist
+## Updater Secrets
+
+SparkSpeech uses the official Tauri updater. The updater public key is stored in `src-tauri/tauri.conf.json`.
+
+The private signing key and password are stored in GitHub Actions secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+The local signing key is stored outside the repository:
+
+- `%USERPROFILE%\.tauri\sparkspeech-updater.key`
+- `%USERPROFILE%\.tauri\sparkspeech-updater.key.password.txt`
+
+If the key ever needs to be regenerated, use:
+
+```powershell
+npx tauri signer generate --write-keys "$env:USERPROFILE\.tauri\sparkspeech-updater.key" --force
+Get-Content "$env:USERPROFILE\.tauri\sparkspeech-updater.key" -Raw | gh secret set TAURI_SIGNING_PRIVATE_KEY --repo lanbinleo/SparkSpeech
+"<password>" | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo lanbinleo/SparkSpeech
+```
+
+After regenerating the key, update the `plugins.updater.pubkey` value in `src-tauri/tauri.conf.json`.
+
+## GitHub Actions Release Checklist
 
 1. Start from a clean workspace.
 2. Confirm the target version and branch.
@@ -105,37 +129,42 @@ The visible product version should remain `0.1.0` until the next release is inte
 ```powershell
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
-npm run tauri:build -- --no-bundle
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-6. Confirm artifacts exist:
+6. Review the diff.
+7. Commit release changes.
+8. Push the release branch and open a PR into `main`.
+9. After the PR is merged, create and push an annotated tag from `main`:
 
 ```powershell
-Test-Path src-tauri\target\release\sparkspeech.exe
-Test-Path src-tauri\target\release\bundle\nsis\SparkSpeech_x.y.z_x64-setup.exe
-Test-Path src-tauri\target\release\bundle\msi\SparkSpeech_x.y.z_x64_en-US.msi
+git checkout main
+git pull
+git tag -a v0.1.1 -m "SparkSpeech 0.1.1"
+git push origin v0.1.1
 ```
 
-7. Review the diff.
-8. Commit release changes.
-9. Merge the release branch into `main`.
-10. Create and push an annotated tag:
+10. GitHub Actions runs `.github/workflows/release.yml`.
+11. Confirm the GitHub Release includes:
+
+- NSIS installer
+- MSI installer
+- updater artifacts
+- `latest.json`
+
+12. Install the previous production version and use Settings -> About -> Check Update to verify the app sees the new release.
+
+## Manual Local Release Build
+
+Use this only for local artifact verification:
 
 ```powershell
-git tag -a v0.1.0 -m "SparkSpeech 0.1.0"
-git push origin v0.1.0
+$env:TAURI_SIGNING_PRIVATE_KEY=(Get-Content "$env:USERPROFILE\.tauri\sparkspeech-updater.key" -Raw)
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD=(Get-Content "$env:USERPROFILE\.tauri\sparkspeech-updater.key.password.txt" -Raw)
+npm run tauri:build
 ```
 
-11. Create the GitHub Release and upload installers:
-
-```powershell
-gh release create v0.1.0 `
-  "src-tauri\target\release\bundle\nsis\SparkSpeech_0.1.0_x64-setup.exe" `
-  "src-tauri\target\release\bundle\msi\SparkSpeech_0.1.0_x64_en-US.msi" `
-  --repo lanbinleo/SparkSpeech `
-  --title "SparkSpeech 0.1.0" `
-  --notes-file docs\release-0.1.0.md
-```
+The local build should create installers under `src-tauri\target\release\bundle\`.
 
 ## Local Data Migration
 
@@ -168,4 +197,3 @@ Close SparkSpeech before copying data so the running app does not rewrite files 
 - Verification commands relevant to the change pass.
 - Release artifacts are regenerated for release work.
 - Git history is grouped into clear Conventional Commits.
-

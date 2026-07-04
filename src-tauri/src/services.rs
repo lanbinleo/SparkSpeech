@@ -140,11 +140,13 @@ pub async fn transcribe_audio(
         .flat_map(|sample| sample.to_le_bytes())
         .collect::<Vec<_>>();
     let chunk_size = 16_000 / 5 * 2;
-    for chunk in bytes.chunks(chunk_size) {
+    let mut chunks = bytes.chunks(chunk_size).peekable();
+    while let Some(chunk) = chunks.next() {
+        let is_last = chunks.peek().is_none();
         ws.send(Message::Binary(
             build_frame(
                 MessageKind::AudioOnlyRequest,
-                false,
+                is_last,
                 Serialization::None,
                 CompressionFlag::Gzip,
                 &gzip(chunk.to_vec())?,
@@ -154,19 +156,6 @@ pub async fn transcribe_audio(
         .await
         .map_err(|error| error.to_string())?;
     }
-
-    ws.send(Message::Binary(
-        build_frame(
-            MessageKind::AudioOnlyRequest,
-            true,
-            Serialization::None,
-            CompressionFlag::Gzip,
-            &gzip(Vec::new())?,
-        )
-        .into(),
-    ))
-    .await
-    .map_err(|error| error.to_string())?;
 
     let mut latest_text = String::new();
     while let Some(message) = ws.next().await {

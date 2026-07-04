@@ -11,6 +11,7 @@ export function Overlay() {
     label: "",
     elapsed_ms: 0,
     input_level: 0,
+    action_label: null,
   });
   const [speechHoldUntil, setSpeechHoldUntil] = useState(0);
   const [now, setNow] = useState(Date.now());
@@ -49,22 +50,40 @@ export function Overlay() {
   const level = Math.max(0, Math.min(1, state.input_level ?? 0));
   const speaking = level > 0.08 || now < speechHoldUntil;
   const waveStyle = { "--level": speaking ? "1" : "0" } as CSSProperties;
+  const [attentionTitle, ...attentionDetail] = state.label.split("：");
+
+  async function handleAction() {
+    await call<boolean>("open_main_window");
+  }
 
   return (
     <div className="overlay-root">
       <div className={`recording-pill overlay-pill ${state.phase}`}>
-        <span>{state.label}</span>
-        <i />
-        {state.phase === "recording" ? (
-          <div className={speaking ? "wave speaking" : "wave quiet"} style={waveStyle} aria-hidden="true">
-            <b style={{ "--bar": "0.55" } as CSSProperties} />
-            <b style={{ "--bar": "0.9" } as CSSProperties} />
-            <b style={{ "--bar": "1" } as CSSProperties} />
-            <b style={{ "--bar": "0.75" } as CSSProperties} />
-            <b style={{ "--bar": "0.45" } as CSSProperties} />
-          </div>
+        {state.phase === "attention" ? (
+          <>
+            <div className="overlay-message">
+              <strong>{attentionTitle}</strong>
+              <span>{attentionDetail.join("：")}</span>
+            </div>
+            <button className="overlay-action" type="button" onClick={handleAction}>
+              {state.action_label ?? "打开主界面"}
+            </button>
+          </>
         ) : (
-          <div className="spinner" aria-hidden="true" />
+          <>
+            <span>{state.label}</span>
+            <i />
+            {state.phase === "recording" ? (
+              <div className={speaking ? "wave speaking" : "wave quiet"} style={waveStyle} aria-hidden="true">
+                <b style={{ "--bar": "0.55" } as CSSProperties} />
+                <b style={{ "--bar": "0.9" } as CSSProperties} />
+                <b style={{ "--bar": "0.75" } as CSSProperties} />
+                <b style={{ "--bar": "0.45" } as CSSProperties} />
+              </div>
+            ) : (
+              <div className="spinner" aria-hidden="true" />
+            )}
+          </>
         )}
       </div>
     </div>
