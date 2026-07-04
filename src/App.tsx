@@ -28,6 +28,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { call } from "./tauri";
@@ -80,6 +81,9 @@ export function App() {
     status: "idle",
     elapsed_ms: 0,
   });
+  const [draggingFile, setDraggingFile] = useState(false);
+  const [importingAudio, setImportingAudio] = useState(false);
+  const importingAudioRef = useRef(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   useEffect(() => {
@@ -134,6 +138,38 @@ export function App() {
 
     return () => window.clearInterval(timer);
   }, [recording.active, recording.started_at]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setDraggingFile(true);
+          return;
+        }
+        if (event.payload.type === "leave") {
+          setDraggingFile(false);
+          return;
+        }
+        setDraggingFile(false);
+        const [path] = event.payload.paths;
+        if (path) importAudioFile(path);
+      })
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+        } else {
+          unlisten = dispose;
+        }
+      })
+      .catch((error) => showToast(`拖拽监听不可用：${String(error)}`, "error"));
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const selectedTitle = useMemo(() => {
     if (activeTab === "models") return "模型配置";
@@ -222,6 +258,24 @@ export function App() {
     showToast(next.error_message ?? "内容优化完成", next.error_message ? "error" : "success");
   }
 
+  async function importAudioFile(path: string) {
+    if (importingAudioRef.current) return;
+    importingAudioRef.current = true;
+    setImportingAudio(true);
+    showToast("音频导入中");
+    try {
+      const record = await call<SpeechRecord>("import_audio_file", { path });
+      setActiveTab("home");
+      mergeRecord(record);
+      showToast(record.error_message ?? "音频处理完成", record.error_message ? "error" : "success");
+    } catch (error) {
+      showToast(String(error), "error");
+    } finally {
+      importingAudioRef.current = false;
+      setImportingAudio(false);
+    }
+  }
+
   async function loadMoreRecords() {
     if (recordsLoading || !hasMoreRecords) return;
     setRecordsLoading(true);
@@ -254,7 +308,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${draggingFile ? " dragging-file" : ""}`}>
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-mark" src="/logo.svg" alt="" />
@@ -361,6 +415,15 @@ export function App() {
       </main>
 
       <ToastViewport toasts={toasts} />
+
+      {draggingFile && (
+        <div className="drop-overlay">
+          <div>
+            <FileAudio size={24} />
+            <strong>{importingAudio ? "正在导入" : "释放导入 WAV 音频"}</strong>
+          </div>
+        </div>
+      )}
 
       {selectedRecord && (
         <RecordDetailsModal

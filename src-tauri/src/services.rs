@@ -1,9 +1,10 @@
 use std::{io::Write, path::Path};
 
 use flate2::{write::GzEncoder, Compression};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::try_join, SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, Message},
@@ -14,6 +15,9 @@ use crate::{
     models::{AppSettings, PromptSettings},
     recorder::read_wav_pcm_16k,
 };
+
+const DOUBAO_AUDIO_CHUNK_MS: usize = 200;
+const DOUBAO_FAST_SEND_DELAY_MS: u64 = 10;
 
 pub async fn transcribe_audio(
     settings: &AppSettings,
@@ -84,7 +88,7 @@ pub async fn transcribe_audio(
     );
     headers.insert("X-Api-Sequence", "-1".parse().unwrap());
 
-    let (mut ws, response) = connect_async(request).await.map_err(|error| {
+    let (ws, response) = connect_async(request).await.map_err(|error| {
         let message = error.to_string();
         if message.contains("401") || message.contains("Unauthorized") {
             format!(
@@ -122,57 +126,71 @@ pub async fn transcribe_audio(
         }
     });
 
-    ws.send(Message::Binary(
-        build_frame(
-            MessageKind::FullClientRequest,
-            false,
-            Serialization::Json,
-            CompressionFlag::Gzip,
-            &gzip(serde_json::to_vec(&init_payload).map_err(|error| error.to_string())?)?,
-        )
-        .into(),
-    ))
-    .await
-    .map_err(|error| error.to_string())?;
-
-    let bytes = pcm
-        .iter()
-        .flat_map(|sample| sample.to_le_bytes())
-        .collect::<Vec<_>>();
-    let chunk_size = 16_000 / 5 * 2;
-    let mut chunks = bytes.chunks(chunk_size).peekable();
-    while let Some(chunk) = chunks.next() {
-        let is_last = chunks.peek().is_none();
-        ws.send(Message::Binary(
-            build_frame(
-                MessageKind::AudioOnlyRequest,
-                is_last,
-                Serialization::None,
-                CompressionFlag::Gzip,
-                &gzip(chunk.to_vec())?,
-            )
-            .into(),
-        ))
-        .await
-        .map_err(|error| error.to_string())?;
-    }
-
-    let mut latest_text = String::new();
-    while let Some(message) = ws.next().await {
-        let message = message.map_err(|error| error.to_string())?;
-        let Message::Binary(data) = message else {
-            continue;
-        };
-        let response = parse_server_frame(&data)?;
-        if let Some(text) = response.text {
-            if !text.trim().is_empty() {
-                latest_text = text;
+    let (mut write, mut read) = ws.split();
+    let reader = async move {
+        let mut latest_text = String::new();
+        while let Some(message) = read.next().await {
+            let message = message.map_err(|error| error.to_string())?;
+            let Message::Binary(data) = message else {
+                continue;
+            };
+            let response = parse_server_frame(data.as_ref())?;
+            if let Some(text) = response.text {
+                if !text.trim().is_empty() {
+                    latest_text = text;
+                }
+            }
+            if response.is_last {
+                break;
             }
         }
-        if response.is_last {
-            break;
+        Ok::<String, String>(latest_text)
+    };
+
+    let writer = async move {
+        write
+            .send(Message::Binary(
+                build_frame(
+                    MessageKind::FullClientRequest,
+                    false,
+                    Serialization::Json,
+                    CompressionFlag::Gzip,
+                    &gzip(serde_json::to_vec(&init_payload).map_err(|error| error.to_string())?)?,
+                )
+                .into(),
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let bytes = pcm
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        let chunk_size = 16_000 * 2 * DOUBAO_AUDIO_CHUNK_MS / 1000;
+        let mut chunks = bytes.chunks(chunk_size).peekable();
+        while let Some(chunk) = chunks.next() {
+            let is_last = chunks.peek().is_none();
+            write
+                .send(Message::Binary(
+                    build_frame(
+                        MessageKind::AudioOnlyRequest,
+                        is_last,
+                        Serialization::None,
+                        CompressionFlag::Gzip,
+                        &gzip(chunk.to_vec())?,
+                    )
+                    .into(),
+                ))
+                .await
+                .map_err(|error| error.to_string())?;
+            if !is_last {
+                sleep(Duration::from_millis(DOUBAO_FAST_SEND_DELAY_MS)).await;
+            }
         }
-    }
+        Ok::<(), String>(())
+    };
+
+    let (_, latest_text) = try_join(writer, reader).await?;
 
     Ok((latest_text, log_id, request_id))
 }
