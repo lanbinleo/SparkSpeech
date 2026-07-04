@@ -171,7 +171,7 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
   }
 
   if (command === "get_app_version") {
-    return "0.1.1" as T;
+    return "0.1.2" as T;
   }
 
   if (command === "save_settings") {
@@ -281,6 +281,30 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
     };
     fallback.records = [record, ...fallback.records];
     fallback.recording = { active: false, started_at: null, status: "idle", elapsed_ms: 0 };
+    return record as T;
+  }
+
+  if (command === "import_audio_file") {
+    const now = new Date().toISOString();
+    const record: SpeechRecord = {
+      id: crypto.randomUUID(),
+      created_at: now,
+      updated_at: now,
+      raw_asr_text: "这是拖拽导入音频的本地模拟 ASR 原文。",
+      final_text: "这是拖拽导入音频的本地模拟 ASR 原文。",
+      audio_path: String(args?.path ?? ""),
+      duration_ms: 5200,
+      audio_expires_at: null,
+      asr_status: "mocked",
+      optimize_status: "mocked",
+      copied_at: null,
+      pasted_at: null,
+      error_message: null,
+      doubao_request_id: null,
+      doubao_log_id: null,
+      openrouter_model: fallback.settings.openrouter_model,
+    };
+    fallback.records = [record, ...fallback.records];
     return record as T;
   }
 

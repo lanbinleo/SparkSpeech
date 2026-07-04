@@ -15,6 +15,7 @@ pub fn run() {
             copy_text,
             start_recording,
             stop_recording,
+            import_audio_file,
             retry_asr,
             retry_optimize,
             read_audio_data_url,
@@ -405,6 +406,80 @@ async fn stop_recording(
     record = optimize_record(app.clone(), record).await;
 
     reset_recording_state(&app, &state)?;
+    finish_overlay_after_record(app.clone(), &record);
+    Ok(record)
+}
+
+#[tauri::command]
+async fn import_audio_file(app: AppHandle, path: String) -> Result<SpeechRecord, String> {
+    let source_path = PathBuf::from(path);
+    if !source_path.exists() || !source_path.is_file() {
+        return Err("音频文件不存在".into());
+    }
+    let extension = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension != "wav" {
+        return Err("目前拖拽导入支持 WAV 音频".into());
+    }
+
+    let settings = storage::get_settings(&app)?;
+    let record_id = Uuid::new_v4().to_string();
+    let audio_path = storage::recording_path(&app, &record_id)?;
+    std::fs::copy(&source_path, &audio_path).map_err(|error| error.to_string())?;
+    let duration_ms = recorder::read_wav_pcm_16k(&audio_path)
+        .map(|pcm| (pcm.len() as u64 * 1000) / 16_000)
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&audio_path);
+            format!("无法读取 WAV 音频：{error}")
+        })?;
+    storage::append_log(
+        &app,
+        &format!(
+            "audio imported: {} -> {}",
+            source_path.display(),
+            audio_path.display()
+        ),
+    );
+
+    let now = Utc::now();
+    let mut record = SpeechRecord {
+        id: record_id,
+        created_at: now.to_rfc3339(),
+        updated_at: now.to_rfc3339(),
+        raw_asr_text: String::new(),
+        final_text: String::new(),
+        audio_path: Some(path_to_string(&audio_path)),
+        duration_ms: Some(duration_ms),
+        audio_expires_at: Some(
+            (now + Duration::days(settings.recording_retention_days)).to_rfc3339(),
+        ),
+        asr_status: "pending".into(),
+        optimize_status: "pending".into(),
+        copied_at: None,
+        pasted_at: None,
+        error_message: None,
+        doubao_request_id: None,
+        doubao_log_id: None,
+        openrouter_model: Some(settings.openrouter_model.clone()),
+    };
+    record = storage::upsert_record(&app, record)?;
+    app.emit("record-updated", &record)
+        .map_err(|error| error.to_string())?;
+
+    show_overlay(&app, "transcribing", "文字转写中", 0)?;
+    record = match transcribe_record(app.clone(), record).await {
+        Ok(record) => record,
+        Err(record) => {
+            finish_overlay_after_record(app.clone(), &record);
+            return Ok(record);
+        }
+    };
+
+    show_overlay(&app, "optimizing", "内容优化中", 0)?;
+    record = optimize_record(app.clone(), record).await;
     finish_overlay_after_record(app.clone(), &record);
     Ok(record)
 }
