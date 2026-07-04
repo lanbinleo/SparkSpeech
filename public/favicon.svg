@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="SparkSpeech">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="12" x2="112" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#181818"/>
+      <stop offset="1" stop-color="#050505"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="40" y1="20" x2="78" y2="102" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd15c"/>
+      <stop offset="0.52" stop-color="#ff9f1a"/>
+      <stop offset="1" stop-color="#ff6b00"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="78" y1="42" x2="106" y2="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#18a0fb"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)"/>
+  <path d="M61 20 35 67h22l-9 41 38-58H62l12-30H61Z" fill="url(#bolt)"/>
+  <g fill="url(#wave)">
+    <rect x="82" y="48" width="6" height="32" rx="3"/>
+    <rect x="94" y="40" width="6" height="48" rx="3"/>
+    <rect x="106" y="53" width="6" height="22" rx="3"/>
+  </g>
+</svg>
