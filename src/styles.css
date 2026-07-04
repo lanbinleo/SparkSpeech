@@ -641,6 +641,141 @@ textarea::-webkit-resizer {
   height: 16px;
 }
 
+.switch-field {
+  display: inline-grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.switch-field input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch-field span {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.switch-field span::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.switch-field input:checked + span {
+  border-color: color-mix(in srgb, var(--primary) 58%, var(--control-border));
+  background: color-mix(in srgb, var(--primary) 20%, var(--surface-soft));
+}
+
+.switch-field input:checked + span::after {
+  transform: translateX(18px);
+  background: var(--primary);
+}
+
+.switch-field input:focus-visible + span {
+  outline: 2px solid color-mix(in srgb, var(--primary) 36%, transparent);
+  outline-offset: 2px;
+}
+
+.switch-field strong {
+  font-size: 14px;
+}
+
+.switch-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) 52px;
+  align-items: center;
+  gap: 18px;
+  min-height: 70px;
+  padding: 14px 0;
+  border-top: 1px solid var(--hairline);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.field-grid > .switch-row:first-child,
+.settings-section > .switch-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.switch-row input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch-row i {
+  position: relative;
+  justify-self: end;
+  width: 52px;
+  height: 30px;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.switch-row i::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.switch-row input:checked + i {
+  border-color: color-mix(in srgb, var(--primary) 68%, var(--control-border));
+  background: var(--primary);
+}
+
+.switch-row input:checked + i::after {
+  transform: translateX(22px);
+  background: #ffffff;
+}
+
+.switch-row input:focus-visible + i {
+  outline: 2px solid color-mix(in srgb, var(--primary) 36%, transparent);
+  outline-offset: 2px;
+}
+
+.switch-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.switch-copy strong {
+  font-size: 15px;
+}
+
+.switch-copy small {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .save-button {
   width: max-content;
 }
@@ -687,13 +822,58 @@ textarea::-webkit-resizer {
   min-height: 180px;
 }
 
+.cleanup-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cleanup-mode-card {
+  display: grid;
+  gap: 8px;
+  min-height: 150px;
+  padding: 18px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cleanup-mode-card.active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+}
+
+.cleanup-mode-card strong {
+  font-size: 17px;
+}
+
+.cleanup-mode-card span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.cleanup-mode-card em {
+  align-self: end;
+  min-height: 54px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-style: normal;
+  line-height: 1.45;
+}
+
 .recording-pill {
   position: fixed;
   left: 50%;
   bottom: 28px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   height: 38px;
   padding: 0 14px;
   border-radius: 999px;
@@ -704,12 +884,25 @@ textarea::-webkit-resizer {
   transform: translateX(-50%);
 }
 
+.recording-pill.saving,
+.recording-pill.transcribing,
+.recording-pill.optimizing {
+  min-width: 0;
+  height: 38px;
+  padding: 0 14px;
+}
+
 .overlay-root {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
   width: 100vw;
   height: 100vh;
-  place-items: center;
+  padding-bottom: 4px;
   background: transparent;
+  user-select: none;
 }
 
 .overlay-pill {
@@ -725,6 +918,90 @@ textarea::-webkit-resizer {
   border-top-color: #ffffff;
   border-radius: 50%;
   animation: spin 800ms linear infinite;
+}
+
+.overlay-transcript {
+  display: grid;
+  align-content: end;
+  gap: 2px;
+  width: min(520px, calc(100vw - 24px));
+  min-height: 48px;
+  max-height: 78px;
+  padding: 9px 14px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #111111;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.overlay-transcript span {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.overlay-transcript .latest {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.overlay-status-icon {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.overlay-status-icon.saved {
+  color: #44d17a;
+}
+
+.overlay-status-icon.error {
+  color: #ff6b6b;
+}
+
+.overlay-progress-ring {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, #151515 43%, transparent 45%),
+    conic-gradient(#ffffff var(--progress), rgba(255, 255, 255, 0.24) 0);
+}
+
+.overlay-progress-text {
+  min-width: 0;
+  margin-left: 2px;
+  color: rgba(255, 255, 255, 0.72);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.recording-pill.recording .overlay-progress-text,
+.recording-pill.saving .overlay-progress-text,
+.recording-pill.transcribing .overlay-progress-text,
+.recording-pill.optimizing .overlay-progress-text {
+  min-width: 0;
+}
+
+.overlay-icon-action {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.overlay-icon-action:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .skeleton-list {

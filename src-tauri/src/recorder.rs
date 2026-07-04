@@ -24,6 +24,13 @@ pub struct RecordedAudio {
     pub pcm_16k: Vec<i16>,
 }
 
+pub struct RecordedSegment {
+    pub audio: RecordedAudio,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub next_sample_index: usize,
+}
+
 impl AudioRecorder {
     pub fn start(preferred_device_name: Option<&str>) -> Result<Self, String> {
         let host = cpal::default_host();
@@ -37,15 +44,24 @@ impl AudioRecorder {
         let input_level = Arc::new(AtomicU32::new(0));
 
         let stream = match config.sample_format() {
-            SampleFormat::F32 => {
-                build_stream::<f32>(&device, &config.into(), samples.clone(), input_level.clone())?
-            }
-            SampleFormat::I16 => {
-                build_stream::<i16>(&device, &config.into(), samples.clone(), input_level.clone())?
-            }
-            SampleFormat::U16 => {
-                build_stream::<u16>(&device, &config.into(), samples.clone(), input_level.clone())?
-            }
+            SampleFormat::F32 => build_stream::<f32>(
+                &device,
+                &config.into(),
+                samples.clone(),
+                input_level.clone(),
+            )?,
+            SampleFormat::I16 => build_stream::<i16>(
+                &device,
+                &config.into(),
+                samples.clone(),
+                input_level.clone(),
+            )?,
+            SampleFormat::U16 => build_stream::<u16>(
+                &device,
+                &config.into(),
+                samples.clone(),
+                input_level.clone(),
+            )?,
             other => return Err(format!("不支持的麦克风采样格式：{other:?}")),
         };
 
@@ -62,6 +78,40 @@ impl AudioRecorder {
 
     pub fn input_level(&self) -> f32 {
         self.input_level.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+
+    pub fn sample_count_for_ms(&self, ms: u64) -> usize {
+        let channels = self.input_channels.max(1) as usize;
+        ((self.input_sample_rate as u64 * ms) / 1000) as usize * channels
+    }
+
+    pub fn segment_since(&self, sample_index: usize) -> Result<Option<RecordedSegment>, String> {
+        let samples = self
+            .samples
+            .lock()
+            .map_err(|_| "无法读取录音缓存".to_string())?;
+        let channels = self.input_channels.max(1) as usize;
+        let end = samples.len() - samples.len() % channels;
+        let start = sample_index.min(end);
+        if end <= start {
+            return Ok(None);
+        }
+
+        let segment_samples = &samples[start..end];
+        let mono = to_mono(segment_samples, self.input_channels);
+        let pcm_16k = resample_to_16k(&mono, self.input_sample_rate);
+        if pcm_16k.is_empty() {
+            return Ok(None);
+        }
+
+        let start_frame = start / channels;
+        let end_frame = end / channels;
+        Ok(Some(RecordedSegment {
+            audio: RecordedAudio { pcm_16k },
+            start_ms: (start_frame as u64 * 1000) / self.input_sample_rate as u64,
+            end_ms: (end_frame as u64 * 1000) / self.input_sample_rate as u64,
+            next_sample_index: end,
+        }))
     }
 
     pub fn stop(mut self) -> Result<RecordedAudio, String> {
@@ -123,6 +173,10 @@ fn select_input_device(
 }
 
 impl RecordedAudio {
+    pub fn from_pcm_16k(pcm_16k: Vec<i16>) -> Self {
+        Self { pcm_16k }
+    }
+
     pub fn duration_ms(&self) -> u64 {
         (self.pcm_16k.len() as u64 * 1000) / 16_000
     }
