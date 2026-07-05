@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Check, Mic, RotateCw, WifiOff } from "lucide-react";
@@ -21,6 +21,7 @@ export function Overlay() {
   });
   const [speechHoldUntil, setSpeechHoldUntil] = useState(0);
   const [now, setNow] = useState(Date.now());
+  const animatedProgressCurrent = useAnimatedProgress(state);
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-html");
@@ -57,8 +58,10 @@ export function Overlay() {
   const speaking = level > 0.08 || now < speechHoldUntil;
   const waveStyle = { "--level": speaking ? "1" : "0" } as CSSProperties;
   const [attentionTitle, ...attentionDetail] = state.label.split("：");
-  const progressPercent = getProgressPercent(state);
-  const statusText = getStatusText(state);
+  const displayState =
+    animatedProgressCurrent === null ? state : { ...state, progress_current: animatedProgressCurrent };
+  const progressPercent = getProgressPercent(displayState);
+  const statusText = getStatusText(displayState);
 
   async function handleAction() {
     if (state.reconnect_available) {
@@ -123,6 +126,85 @@ export function Overlay() {
       </div>
     </div>
   );
+}
+
+type ProgressSnapshot = {
+  phase: string;
+  current: number;
+  total: number;
+};
+
+function useAnimatedProgress(state: OverlayState) {
+  const [display, setDisplay] = useState<ProgressSnapshot | null>(null);
+  const displayRef = useRef<ProgressSnapshot | null>(null);
+  const target = getProgressSnapshot(state);
+
+  useEffect(() => {
+    if (!target) {
+      displayRef.current = null;
+      setDisplay(null);
+      return;
+    }
+
+    const activeTarget = target;
+    const previous = displayRef.current;
+    const startCurrent =
+      previous &&
+      previous.phase === activeTarget.phase &&
+      previous.total === activeTarget.total &&
+      previous.current <= activeTarget.current
+        ? previous.current
+        : 0;
+    const start: ProgressSnapshot = { ...activeTarget, current: startCurrent };
+    displayRef.current = start;
+    setDisplay(start);
+
+    let frame = 0;
+    let last = performance.now();
+
+    function tick(time: number) {
+      const previousDisplay = displayRef.current;
+      if (!previousDisplay) return;
+
+      const elapsed = Math.max(1, time - last);
+      last = time;
+      const gap = activeTarget.current - previousDisplay.current;
+      const snapDistance =
+        activeTarget.phase === "optimizing" ? Math.max(1, activeTarget.total * 0.006) : Math.max(120, activeTarget.total * 0.006);
+
+      if (gap <= snapDistance) {
+        const next: ProgressSnapshot = { ...activeTarget };
+        displayRef.current = next;
+        setDisplay(next);
+        return;
+      }
+
+      const easing = Math.min(0.86, 1 - Math.exp(-elapsed / 140));
+      const next: ProgressSnapshot = {
+        ...activeTarget,
+        current: previousDisplay.current + gap * easing,
+      };
+      displayRef.current = next;
+      setDisplay(next);
+      frame = window.requestAnimationFrame(tick);
+    }
+
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [target?.phase, target?.current, target?.total]);
+
+  return display?.current ?? null;
+}
+
+function getProgressSnapshot(state: OverlayState): ProgressSnapshot | null {
+  if (typeof state.progress_current !== "number" || typeof state.progress_total !== "number" || state.progress_total <= 0) {
+    return null;
+  }
+  return {
+    phase: state.phase,
+    current: Math.min(state.progress_total, Math.max(0, state.progress_current)),
+    total: state.progress_total,
+  };
 }
 
 function OverlayStatusIcon({ kind }: { kind: string }) {

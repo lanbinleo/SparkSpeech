@@ -115,6 +115,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     App, AppHandle, Emitter, Manager, State, WebviewWindow,
 };
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
@@ -129,9 +130,21 @@ struct AppState {
     realtime_transcript: Mutex<Vec<String>>,
     realtime_text: Mutex<String>,
     realtime_running: Mutex<bool>,
+    realtime_failed: Mutex<bool>,
+    realtime_sender: Mutex<Option<mpsc::Sender<services::RealtimeAudioChunk>>>,
+    realtime_completion:
+        Mutex<Option<oneshot::Receiver<Result<services::RealtimeTranscriptionResult, String>>>>,
     realtime_checkpoint: Mutex<usize>,
+    realtime_enqueued_checkpoint: Mutex<usize>,
+    realtime_sent_ms: Mutex<u64>,
     shortcut: Mutex<Option<shortcut::ShortcutHandle>>,
     overlay: Mutex<OverlayState>,
+}
+
+enum FastAsrOutcome {
+    Completed(SpeechRecord),
+    NoSpeech(SpeechRecord),
+    Fallback(SpeechRecord),
 }
 
 fn create_tray(app: &App) -> tauri::Result<()> {
@@ -203,7 +216,7 @@ fn save_settings(
     storage::append_log(
         &app,
         &format!(
-            "设置已保存：自动粘贴={}，保存日志={}，开机自启动={}，录音保留={} 天。",
+            "设置已保存：自动粘贴={}，保存日志={}，开机自启动={}，录音保留={} 天，片段间隔={} 秒，快速转写={}。",
             if settings.auto_paste {
                 "开启"
             } else {
@@ -219,7 +232,13 @@ fn save_settings(
             } else {
                 "关闭"
             },
-            settings.recording_retention_days
+            settings.recording_retention_days,
+            recording_segment_seconds(&settings),
+            if settings.fast_asr_finalize {
+                "开启"
+            } else {
+                "关闭"
+            }
         ),
     );
     register_shortcut(&app, state)?;
@@ -489,9 +508,29 @@ fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<Recordi
         .map_err(|_| "无法更新实时转写文本".to_string())?
         .clear();
     *state
+        .realtime_failed
+        .lock()
+        .map_err(|_| "无法更新实时转写状态".to_string())? = false;
+    *state
+        .realtime_sender
+        .lock()
+        .map_err(|_| "无法更新实时转写通道".to_string())? = None;
+    *state
+        .realtime_completion
+        .lock()
+        .map_err(|_| "无法更新实时转写完成状态".to_string())? = None;
+    *state
         .realtime_checkpoint
         .lock()
         .map_err(|_| "无法更新实时转写位置".to_string())? = 0;
+    *state
+        .realtime_enqueued_checkpoint
+        .lock()
+        .map_err(|_| "无法更新实时转写队列位置".to_string())? = 0;
+    *state
+        .realtime_sent_ms
+        .lock()
+        .map_err(|_| "无法更新实时转写进度".to_string())? = 0;
     *state
         .realtime_running
         .lock()
@@ -500,7 +539,7 @@ fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<Recordi
     show_overlay(&app, "recording", "直接说", 0)?;
     start_overlay_level_loop(app.clone());
     start_recording_segment_loop(app.clone(), session_id.clone());
-    if settings.show_realtime_transcript {
+    if settings.fast_asr_finalize || settings.show_realtime_transcript {
         if let Err(error) = start_realtime_asr_loop(app.clone(), 0, false) {
             storage::append_log(
                 &app,
@@ -534,6 +573,13 @@ async fn stop_recording(
     set_session_status(&app, &state, "saving")?;
     show_overlay(&app, "saving", "正在保存录音", 0)?;
 
+    let settings = storage::get_settings(&app)?;
+    let fast_asr_upload_started = if settings.fast_asr_finalize {
+        finish_realtime_audio_upload(&app, &state).await
+    } else {
+        false
+    };
+
     let recorder = state
         .recorder
         .lock()
@@ -541,7 +587,6 @@ async fn stop_recording(
         .take()
         .ok_or_else(|| "当前没有正在进行的录音".to_string())?;
 
-    let settings = storage::get_settings(&app)?;
     let active_session_id = state
         .active_session_id
         .lock()
@@ -605,14 +650,37 @@ async fn stop_recording(
 
     set_session_status(&app, &state, "transcribing")?;
     show_overlay(&app, "transcribing", "文字转写中", 0)?;
-    record = match transcribe_record(app.clone(), record).await {
-        Ok(record) => record,
-        Err(record) => {
-            reset_recording_state(&app, &state)?;
-            finish_overlay_after_record(app.clone(), &record);
-            return Ok(record);
+    if settings.fast_asr_finalize {
+        match apply_fast_asr_result(app.clone(), record, fast_asr_upload_started).await {
+            FastAsrOutcome::Completed(next) => {
+                record = next;
+            }
+            FastAsrOutcome::NoSpeech(next) => {
+                reset_recording_state(&app, &state)?;
+                finish_overlay_after_record(app.clone(), &next);
+                return Ok(next);
+            }
+            FastAsrOutcome::Fallback(next) => {
+                record = match transcribe_record(app.clone(), next).await {
+                    Ok(record) => record,
+                    Err(record) => {
+                        reset_recording_state(&app, &state)?;
+                        finish_overlay_after_record(app.clone(), &record);
+                        return Ok(record);
+                    }
+                };
+            }
         }
-    };
+    } else {
+        record = match transcribe_record(app.clone(), record).await {
+            Ok(record) => record,
+            Err(record) => {
+                reset_recording_state(&app, &state)?;
+                finish_overlay_after_record(app.clone(), &record);
+                return Ok(record);
+            }
+        }
+    }
 
     set_session_status(&app, &state, "optimizing")?;
     show_overlay(&app, "optimizing", "内容优化中", 0)?;
@@ -621,6 +689,218 @@ async fn stop_recording(
     reset_recording_state(&app, &state)?;
     finish_overlay_after_record(app.clone(), &record);
     Ok(record)
+}
+
+async fn finish_realtime_audio_upload(app: &AppHandle, state: &State<'_, AppState>) -> bool {
+    let failed = state
+        .realtime_failed
+        .lock()
+        .map(|value| *value)
+        .unwrap_or(true);
+    if failed {
+        return false;
+    }
+
+    let sender = state
+        .realtime_sender
+        .lock()
+        .ok()
+        .and_then(|mut sender| sender.take());
+    let Some(sender) = sender else {
+        return false;
+    };
+
+    let checkpoint = state
+        .realtime_checkpoint
+        .lock()
+        .map(|value| *value)
+        .unwrap_or(0);
+    let enqueued_checkpoint = state
+        .realtime_enqueued_checkpoint
+        .lock()
+        .map(|value| *value)
+        .unwrap_or(0);
+    let tail_start = checkpoint.max(enqueued_checkpoint);
+    let final_segment = state
+        .recorder
+        .lock()
+        .ok()
+        .and_then(|recorder| {
+            recorder
+                .as_ref()
+                .and_then(|recorder| recorder.segment_since(tail_start).ok())
+        })
+        .flatten();
+
+    if let Some(segment) = final_segment {
+        if let Err(error) = send_realtime_segment_chunks(&sender, segment, tail_start, 10).await {
+            mark_realtime_asr_failed(app, &error);
+            return false;
+        }
+    }
+
+    drop(sender);
+    storage::append_log(app, "快速转写已发送最后一段音频，等待豆包最终结果。");
+    true
+}
+
+async fn send_realtime_segment_chunks(
+    sender: &mpsc::Sender<services::RealtimeAudioChunk>,
+    segment: recorder::RecordedSegment,
+    base_sample_index: usize,
+    send_delay_ms: u64,
+) -> Result<(), String> {
+    let chunk_len = 16_000 * 200 / 1000;
+    let total_samples = segment.audio.pcm_16k.len();
+    if total_samples == 0 {
+        return Ok(());
+    }
+
+    let mut sent_samples = 0_usize;
+    for chunk in segment.audio.pcm_16k.chunks(chunk_len) {
+        sent_samples += chunk.len();
+        let is_last_chunk = sent_samples >= total_samples;
+        let end_ms = if is_last_chunk {
+            segment.end_ms
+        } else {
+            segment.start_ms + (sent_samples as u64 * 1000) / 16_000
+        };
+        let next_sample_index = if is_last_chunk {
+            segment.next_sample_index
+        } else {
+            base_sample_index
+        };
+        sender
+            .send(services::RealtimeAudioChunk {
+                pcm_16k: chunk.to_vec(),
+                next_sample_index,
+                end_ms,
+                send_delay_ms,
+            })
+            .await
+            .map_err(|_| "快速转写通道已关闭".to_string())?;
+    }
+    Ok(())
+}
+
+async fn apply_fast_asr_result(
+    app: AppHandle,
+    mut record: SpeechRecord,
+    upload_started: bool,
+) -> FastAsrOutcome {
+    if !upload_started {
+        storage::append_log(
+            &app,
+            &format!(
+                "快速转写未完成上传：record_id={}，改用完整音频转写。",
+                record.id
+            ),
+        );
+        return FastAsrOutcome::Fallback(record);
+    }
+
+    let Some(app_state) = app.try_state::<AppState>() else {
+        return FastAsrOutcome::Fallback(record);
+    };
+    let completion = app_state
+        .realtime_completion
+        .lock()
+        .ok()
+        .and_then(|mut completion| completion.take());
+    let Some(completion) = completion else {
+        storage::append_log(
+            &app,
+            &format!(
+                "快速转写没有完成通知：record_id={}，改用完整音频转写。",
+                record.id
+            ),
+        );
+        return FastAsrOutcome::Fallback(record);
+    };
+
+    if let Some(total_ms) = record.duration_ms {
+        let sent_ms = app_state
+            .realtime_sent_ms
+            .lock()
+            .map(|value| *value)
+            .unwrap_or(0);
+        update_overlay_progress(&app, "transcribing", sent_ms.min(total_ms), total_ms);
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_millis(5000), completion).await;
+    let result = match result {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(error))) => {
+            storage::append_log(
+                &app,
+                &format!("快速转写失败：record_id={}，错误={}。", record.id, error),
+            );
+            return FastAsrOutcome::Fallback(record);
+        }
+        Ok(Err(_)) => {
+            storage::append_log(
+                &app,
+                &format!(
+                    "快速转写任务提前结束：record_id={}，改用完整音频转写。",
+                    record.id
+                ),
+            );
+            return FastAsrOutcome::Fallback(record);
+        }
+        Err(_) => {
+            storage::append_log(
+                &app,
+                &format!(
+                    "快速转写等待超时：record_id={}，改用完整音频转写。",
+                    record.id
+                ),
+            );
+            return FastAsrOutcome::Fallback(record);
+        }
+    };
+
+    if let Some(total_ms) = record.duration_ms {
+        update_overlay_progress(&app, "transcribing", total_ms, total_ms);
+    }
+
+    let text = result.text.trim().to_string();
+    record.doubao_log_id = result.log_id;
+    record.doubao_request_id = Some(result.request_id);
+    if text.is_empty() {
+        record.raw_asr_text = String::new();
+        record.final_text = "没有录音".into();
+        record.asr_status = "no_speech".into();
+        record.optimize_status = "blocked".into();
+        record.error_message = None;
+        record.updated_at = Utc::now().to_rfc3339();
+        let _ = storage::upsert_record(&app, record.clone());
+        let _ = app.emit("record-updated", &record);
+        storage::append_log(
+            &app,
+            &format!(
+                "快速转写完成：record_id={}，结果为空，按 no_speech 保存。",
+                record.id
+            ),
+        );
+        return FastAsrOutcome::NoSpeech(record);
+    }
+
+    let asr_chars = count_text_chars(&text);
+    record.raw_asr_text = text;
+    record.asr_status = "completed".into();
+    record.optimize_status = "pending".into();
+    record.error_message = None;
+    record.updated_at = Utc::now().to_rfc3339();
+    let record = storage::upsert_record(&app, record.clone()).unwrap_or(record);
+    let _ = app.emit("record-updated", &record);
+    storage::append_log(
+        &app,
+        &format!(
+            "快速转写完成：record_id={}，原始文本 {} 字。",
+            record.id, asr_chars
+        ),
+    );
+    FastAsrOutcome::Completed(record)
 }
 
 #[tauri::command]
@@ -959,6 +1239,21 @@ fn reset_recording_state(app: &AppHandle, state: &State<'_, AppState>) -> Result
         .recording
         .lock()
         .map_err(|_| "无法更新录音状态".to_string())? = session.clone();
+    if let Ok(mut sender) = state.realtime_sender.lock() {
+        *sender = None;
+    }
+    if let Ok(mut completion) = state.realtime_completion.lock() {
+        *completion = None;
+    }
+    if let Ok(mut failed) = state.realtime_failed.lock() {
+        *failed = false;
+    }
+    if let Ok(mut sent_ms) = state.realtime_sent_ms.lock() {
+        *sent_ms = 0;
+    }
+    if let Ok(mut enqueued_checkpoint) = state.realtime_enqueued_checkpoint.lock() {
+        *enqueued_checkpoint = 0;
+    }
     app.emit("recording-state", session)
         .map_err(|error| error.to_string())
 }
@@ -1062,7 +1357,10 @@ fn start_overlay_level_loop(app: AppHandle) {
                 .map(|state| {
                     (
                         if state.reconnect_available
-                            || state.status_kind.as_deref() == Some("saved")
+                            || matches!(
+                                state.status_kind.as_deref(),
+                                Some("saved") | Some("network_error")
+                            )
                         {
                             state.status_kind.clone()
                         } else {
@@ -1105,9 +1403,12 @@ fn start_recording_segment_loop(app: AppHandle, session_id: String) {
     tauri::async_runtime::spawn(async move {
         let mut next_sample_index = 0_usize;
         let mut segment_index = 0_u32;
+        let segment_seconds = storage::get_settings(&app)
+            .map(|settings| recording_segment_seconds(&settings))
+            .unwrap_or(10);
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(segment_seconds)).await;
             let Some(app_state) = app.try_state::<AppState>() else {
                 break;
             };
@@ -1181,6 +1482,13 @@ fn start_recording_segment_loop(app: AppHandle, session_id: String) {
     });
 }
 
+fn recording_segment_seconds(settings: &AppSettings) -> u64 {
+    match settings.recording_segment_seconds {
+        5 | 10 | 15 | 20 | 25 | 30 => settings.recording_segment_seconds,
+        _ => 10,
+    }
+}
+
 fn start_realtime_asr_loop(
     app: AppHandle,
     start_sample_index: usize,
@@ -1202,7 +1510,15 @@ fn start_realtime_asr_loop(
     }
     reset_realtime_overlay_status(&app);
 
-    let (sender, receiver) = tokio::sync::mpsc::channel::<services::RealtimeAudioChunk>(32);
+    let (sender, receiver) = mpsc::channel::<services::RealtimeAudioChunk>(256);
+    let (completion_sender, completion_receiver) =
+        oneshot::channel::<Result<services::RealtimeTranscriptionResult, String>>();
+    if let Ok(mut realtime_sender) = app_state.realtime_sender.lock() {
+        *realtime_sender = Some(sender.clone());
+    }
+    if let Ok(mut realtime_completion) = app_state.realtime_completion.lock() {
+        *realtime_completion = Some(completion_receiver);
+    }
     start_realtime_audio_producer(app.clone(), sender, start_sample_index, catchup);
 
     tauri::async_runtime::spawn(async move {
@@ -1214,10 +1530,13 @@ fn start_realtime_asr_loop(
             receiver,
             send_delay,
             move |text, utterances| update_realtime_transcript(&app_for_text, &text, utterances),
-            move |next_sample_index, _end_ms| {
+            move |next_sample_index, end_ms| {
                 if let Some(state) = app_for_sent.try_state::<AppState>() {
                     if let Ok(mut checkpoint) = state.realtime_checkpoint.lock() {
                         *checkpoint = next_sample_index;
+                    }
+                    if let Ok(mut sent_ms) = state.realtime_sent_ms.lock() {
+                        *sent_ms = end_ms;
                     }
                 }
             },
@@ -1228,15 +1547,25 @@ fn start_realtime_asr_loop(
             if let Ok(mut running) = state.realtime_running.lock() {
                 *running = false;
             }
-        }
-
-        if let Err(error) = result {
-            storage::append_log(&app, &format!("realtime asr disconnected: {error}"));
-            if is_recording_active(&app) {
-                record_realtime_failure(&app, &error);
-                show_realtime_error_overlay(&app);
+            if let Ok(mut sender) = state.realtime_sender.lock() {
+                *sender = None;
             }
         }
+
+        if let Err(error) = &result {
+            storage::append_log(&app, &format!("realtime asr disconnected: {error}"));
+            mark_realtime_asr_failed(&app, error.as_str());
+            if is_recording_active(&app) {
+                record_realtime_failure(&app, error.as_str());
+                let show_realtime_transcript = storage::get_settings(&app)
+                    .map(|settings| settings.show_realtime_transcript)
+                    .unwrap_or(false);
+                if show_realtime_transcript {
+                    show_realtime_error_overlay(&app);
+                }
+            }
+        }
+        let _ = completion_sender.send(result);
     });
 
     Ok(())
@@ -1318,6 +1647,9 @@ fn start_realtime_audio_producer(
                 }
             }
             next_sample_index = segment.next_sample_index;
+            if let Ok(mut enqueued_checkpoint) = app_state.realtime_enqueued_checkpoint.lock() {
+                *enqueued_checkpoint = next_sample_index;
+            };
         }
     });
 }
@@ -1464,6 +1796,18 @@ fn record_realtime_failure(app: &AppHandle, reason: &str) {
     let _ = storage::append_realtime_failed_range(app, &session_id, start_ms, end_ms, reason);
 }
 
+fn mark_realtime_asr_failed(app: &AppHandle, reason: &str) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut failed) = state.realtime_failed.lock() {
+            *failed = true;
+        }
+        if let Ok(mut sender) = state.realtime_sender.lock() {
+            *sender = None;
+        }
+    }
+    storage::append_log(app, &format!("快速转写已停用本次录音：{reason}"));
+}
+
 fn reset_realtime_overlay_status(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         if let Ok(mut overlay) = state.overlay.lock() {
@@ -1492,12 +1836,12 @@ fn show_realtime_error_overlay(app: &AppHandle) {
             label: "直接说".into(),
             elapsed_ms: 0,
             input_level: 0.0,
-            action_label: Some("重连".into()),
+            action_label: None,
             status_kind: Some("network_error".into()),
             transcript_lines,
             progress_current: None,
             progress_total: None,
-            reconnect_available: true,
+            reconnect_available: false,
         };
         if let Ok(mut overlay) = state.overlay.lock() {
             *overlay = overlay_state.clone();

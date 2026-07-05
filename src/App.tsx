@@ -1240,6 +1240,31 @@ function AppSettingsView({
             type="number"
             onChange={(value) => onChange({ ...settings, recording_retention_days: Number(value) || 1 })}
           />
+          <label className="text-field">
+            <span>片段保存间隔</span>
+            <select
+              value={String(settings.recording_segment_seconds)}
+              onChange={(event) => onChange({ ...settings, recording_segment_seconds: Number(event.currentTarget.value) })}
+            >
+              {[5, 10, 15, 20, 25, 30].map((seconds) => (
+                <option value={seconds} key={seconds}>
+                  {seconds} 秒
+                </option>
+              ))}
+            </select>
+          </label>
+          <SettingsSwitch
+            checked={settings.fast_asr_finalize}
+            title="快速完成转写（实验）"
+            description="录音时提前上传音频；若连接中断，结束后改用完整录音转写。"
+            onChange={(checked) => onChange({ ...settings, fast_asr_finalize: checked })}
+          />
+          <SettingsSwitch
+            checked={settings.show_realtime_transcript}
+            title="显示实时字幕预览"
+            description="录音时在底部状态条显示临时识别文本。"
+            onChange={(checked) => onChange({ ...settings, show_realtime_transcript: checked })}
+          />
           <SettingsSwitch
             checked={settings.auto_paste}
             title="整理成功后自动粘贴"
