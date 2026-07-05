@@ -33,10 +33,14 @@ pub struct AppSettings {
     pub deepseek_api_key: String,
     pub deepseek_base_url: String,
     pub deepseek_model: String,
+    #[serde(default)]
+    pub deepseek_models: Vec<String>,
     pub custom_openai_provider_name: String,
     pub custom_openai_api_key: String,
     pub custom_openai_base_url: String,
     pub custom_openai_model: String,
+    #[serde(default)]
+    pub custom_openai_models: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -70,10 +74,12 @@ impl Default for AppSettings {
             deepseek_api_key: String::new(),
             deepseek_base_url: "https://api.deepseek.com".into(),
             deepseek_model: "deepseek-v4-flash".into(),
+            deepseek_models: Vec::new(),
             custom_openai_provider_name: "Custom".into(),
             custom_openai_api_key: String::new(),
             custom_openai_base_url: String::new(),
             custom_openai_model: String::new(),
+            custom_openai_models: Vec::new(),
         }
     }
 }
