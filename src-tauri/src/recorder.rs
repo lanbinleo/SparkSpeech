@@ -85,6 +85,16 @@ impl AudioRecorder {
         ((self.input_sample_rate as u64 * ms) / 1000) as usize * channels
     }
 
+    pub fn captured_duration_ms(&self) -> Result<u64, String> {
+        let samples = self
+            .samples
+            .lock()
+            .map_err(|_| "无法读取录音缓存".to_string())?;
+        let channels = self.input_channels.max(1) as usize;
+        let frames = samples.len() / channels;
+        Ok((frames as u64 * 1000) / self.input_sample_rate as u64)
+    }
+
     pub fn segment_since(&self, sample_index: usize) -> Result<Option<RecordedSegment>, String> {
         let samples = self
             .samples

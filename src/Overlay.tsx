@@ -138,6 +138,7 @@ function useAnimatedProgress(state: OverlayState) {
   const [display, setDisplay] = useState<ProgressSnapshot | null>(null);
   const displayRef = useRef<ProgressSnapshot | null>(null);
   const target = getProgressSnapshot(state);
+  const visualTargetCurrent = target ? getVisualProgressTarget(target) : null;
 
   useEffect(() => {
     if (!target) {
@@ -146,7 +147,7 @@ function useAnimatedProgress(state: OverlayState) {
       return;
     }
 
-    const activeTarget = target;
+    const activeTarget: ProgressSnapshot = { ...target, current: visualTargetCurrent ?? target.current };
     const previous = displayRef.current;
     const startCurrent =
       previous &&
@@ -160,29 +161,27 @@ function useAnimatedProgress(state: OverlayState) {
     setDisplay(start);
 
     let frame = 0;
-    let last = performance.now();
+    const startedAt = performance.now();
+    const duration = getProgressAnimationDuration(startCurrent, activeTarget.current, activeTarget);
 
     function tick(time: number) {
       const previousDisplay = displayRef.current;
       if (!previousDisplay) return;
 
-      const elapsed = Math.max(1, time - last);
-      last = time;
-      const gap = activeTarget.current - previousDisplay.current;
-      const snapDistance =
-        activeTarget.phase === "optimizing" ? Math.max(1, activeTarget.total * 0.006) : Math.max(120, activeTarget.total * 0.006);
+      const progress = Math.min(1, Math.max(0, (time - startedAt) / duration));
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const current = startCurrent + (activeTarget.current - startCurrent) * eased;
 
-      if (gap <= snapDistance) {
+      if (progress >= 1) {
         const next: ProgressSnapshot = { ...activeTarget };
         displayRef.current = next;
         setDisplay(next);
         return;
       }
 
-      const easing = Math.min(0.86, 1 - Math.exp(-elapsed / 140));
       const next: ProgressSnapshot = {
         ...activeTarget,
-        current: previousDisplay.current + gap * easing,
+        current,
       };
       displayRef.current = next;
       setDisplay(next);
@@ -191,9 +190,24 @@ function useAnimatedProgress(state: OverlayState) {
 
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [target?.phase, target?.current, target?.total]);
+  }, [target?.phase, target?.total, visualTargetCurrent]);
 
   return display?.current ?? null;
+}
+
+function getVisualProgressTarget(target: ProgressSnapshot) {
+  if (target.phase === "transcribing" && target.current < target.total) {
+    return Math.max(target.current, target.total * 0.96);
+  }
+  return target.current;
+}
+
+function getProgressAnimationDuration(from: number, to: number, target: ProgressSnapshot) {
+  if (to <= from) return 180;
+  if (target.phase === "transcribing" && to < target.total) return 3000;
+  if (target.phase === "transcribing" && to >= target.total) return 360;
+  if (target.phase === "optimizing") return 420;
+  return 640;
 }
 
 function getProgressSnapshot(state: OverlayState): ProgressSnapshot | null {

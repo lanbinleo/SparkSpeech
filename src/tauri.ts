@@ -29,10 +29,12 @@ export type AppSettings = {
   deepseek_api_key: string;
   deepseek_base_url: string;
   deepseek_model: string;
+  deepseek_models: string[];
   custom_openai_provider_name: string;
   custom_openai_api_key: string;
   custom_openai_base_url: string;
   custom_openai_model: string;
+  custom_openai_models: string[];
 };
 
 export type PromptSettings = {
@@ -168,10 +170,12 @@ const fallback: BootstrapData = {
     deepseek_api_key: "",
     deepseek_base_url: "https://api.deepseek.com",
     deepseek_model: "deepseek-v4-flash",
+    deepseek_models: [],
     custom_openai_provider_name: "Custom",
     custom_openai_api_key: "",
     custom_openai_base_url: "",
     custom_openai_model: "",
+    custom_openai_models: [],
   },
   prompts: {
     system_prompt: defaultSystemPrompt,

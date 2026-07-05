@@ -774,7 +774,9 @@ function ModelSettings({
   const [editingProvider, setEditingProvider] = useState<"doubao" | "openrouter" | "deepseek" | "custom_openai" | null>(null);
   const [testStatus, setTestStatus] = useState("");
   const [newModelName, setNewModelName] = useState("");
-  const openrouterModels = useMemo(() => normalizeModelList(draft), [draft]);
+  const openrouterModels = useMemo(() => normalizeModelList(draft, "openrouter"), [draft]);
+  const deepseekModels = useMemo(() => normalizeModelList(draft, "deepseek"), [draft]);
+  const customOpenAIModels = useMemo(() => normalizeModelList(draft, "custom_openai"), [draft]);
   const textModelOptions = useMemo(() => buildTextModelOptions(draft), [draft]);
 
   useEffect(() => {
@@ -802,19 +804,53 @@ function ModelSettings({
     }
   }
 
-  function selectOpenRouterModel(openrouter_model: string) {
-    setDraft({ ...draft, optimize_provider: "openrouter", openrouter_model, openrouter_models: openrouterModels });
+  function selectProviderModel(provider: TextProviderKey, model: string) {
+    if (provider === "deepseek") {
+      setDraft({ ...draft, optimize_provider: provider, deepseek_model: model, deepseek_models: deepseekModels });
+      return;
+    }
+    if (provider === "custom_openai") {
+      setDraft({
+        ...draft,
+        optimize_provider: provider,
+        custom_openai_model: model,
+        custom_openai_models: customOpenAIModels,
+      });
+      return;
+    }
+    setDraft({ ...draft, optimize_provider: provider, openrouter_model: model, openrouter_models: openrouterModels });
   }
 
-  function addOpenRouterModel() {
+  function addProviderModel(provider: TextProviderKey) {
     const model = newModelName.trim();
     if (!model) return;
-    const openrouter_models = Array.from(new Set([...openrouterModels, model]));
-    setDraft({ ...draft, openrouter_model: model, openrouter_models });
+    if (provider === "deepseek") {
+      const deepseek_models = Array.from(new Set([...deepseekModels, model]));
+      setDraft({ ...draft, deepseek_model: model, deepseek_models });
+    } else if (provider === "custom_openai") {
+      const custom_openai_models = Array.from(new Set([...customOpenAIModels, model]));
+      setDraft({ ...draft, custom_openai_model: model, custom_openai_models });
+    } else {
+      const openrouter_models = Array.from(new Set([...openrouterModels, model]));
+      setDraft({ ...draft, openrouter_model: model, openrouter_models });
+    }
     setNewModelName("");
   }
 
-  function deleteOpenRouterModel(model: string) {
+  function deleteProviderModel(provider: TextProviderKey, model: string) {
+    if (provider === "deepseek") {
+      const deepseek_models = deepseekModels.filter((item) => item !== model);
+      const deepseek_model = draft.deepseek_model === model ? (deepseek_models[0] ?? "") : draft.deepseek_model;
+      setDraft({ ...draft, deepseek_model, deepseek_models });
+      return;
+    }
+    if (provider === "custom_openai") {
+      const custom_openai_models = customOpenAIModels.filter((item) => item !== model);
+      const custom_openai_model =
+        draft.custom_openai_model === model ? (custom_openai_models[0] ?? "") : draft.custom_openai_model;
+      setDraft({ ...draft, custom_openai_model, custom_openai_models });
+      return;
+    }
     const openrouter_models = openrouterModels.filter((item) => item !== model);
     const openrouter_model = draft.openrouter_model === model ? (openrouter_models[0] ?? "") : draft.openrouter_model;
     setDraft({ ...draft, openrouter_model, openrouter_models });
@@ -826,14 +862,77 @@ function ModelSettings({
     const provider = value.slice(0, separator);
     const model = value.slice(separator + 1);
     if (provider === "deepseek") {
-      setDraft({ ...draft, optimize_provider: "deepseek", deepseek_model: model });
+      setDraft({ ...draft, optimize_provider: "deepseek", deepseek_model: model, deepseek_models: deepseekModels });
       return;
     }
     if (provider === "custom_openai") {
-      setDraft({ ...draft, optimize_provider: "custom_openai", custom_openai_model: model });
+      setDraft({
+        ...draft,
+        optimize_provider: "custom_openai",
+        custom_openai_model: model,
+        custom_openai_models: customOpenAIModels,
+      });
       return;
     }
     setDraft({ ...draft, optimize_provider: "openrouter", openrouter_model: model, openrouter_models: openrouterModels });
+  }
+
+  function providerModels(provider: TextProviderKey) {
+    if (provider === "deepseek") return deepseekModels;
+    if (provider === "custom_openai") return customOpenAIModels;
+    return openrouterModels;
+  }
+
+  function selectedProviderModel(provider: TextProviderKey) {
+    if (provider === "deepseek") return draft.deepseek_model;
+    if (provider === "custom_openai") return draft.custom_openai_model;
+    return draft.openrouter_model;
+  }
+
+  function renderModelManager(provider: TextProviderKey, placeholder: string) {
+    const models = providerModels(provider);
+    const selected = selectedProviderModel(provider);
+    return (
+      <section className="model-manager">
+        <div className="model-manager-heading">
+          <div>
+            <h3>模型</h3>
+            <p>添加常用模型，然后在上方默认模型里选择。</p>
+          </div>
+          <div className="model-add-row">
+            <input
+              value={newModelName}
+              placeholder={placeholder}
+              onChange={(event) => setNewModelName(event.currentTarget.value)}
+            />
+            <button className="secondary-button" type="button" onClick={() => addProviderModel(provider)}>
+              <Plus size={16} />
+              添加模型
+            </button>
+          </div>
+        </div>
+        <div className="model-list">
+          {models.length === 0 && <p className="empty-model-list">还没有模型。</p>}
+          {models.map((model) => (
+            <article className={model === selected ? "model-row active" : "model-row"} key={model}>
+              <div>
+                <strong>{model}</strong>
+                <span>{model === selected ? "当前文本模型" : "自定义"}</span>
+              </div>
+              <div className="model-row-actions">
+                <IconButton label="删除模型" onClick={() => deleteProviderModel(provider, model)}>
+                  <Trash2 size={16} />
+                </IconButton>
+                <button className="secondary-button" type="button" onClick={() => selectProviderModel(provider, model)}>
+                  <CheckCircle2 size={16} />
+                  设为当前
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    );
   }
 
   const activeTextModel = getActiveTextModel(draft);
@@ -917,7 +1016,17 @@ function ModelSettings({
 
       {testStatus && <div className="inline-alert neutral"><CheckCircle2 size={16} />{testStatus}</div>}
 
-      <button className="primary-button save-button" onClick={() => onSave({ ...draft, openrouter_models: openrouterModels })}>
+      <button
+        className="primary-button save-button"
+        onClick={() =>
+          onSave({
+            ...draft,
+            openrouter_models: openrouterModels,
+            deepseek_models: deepseekModels,
+            custom_openai_models: customOpenAIModels,
+          })
+        }
+      >
         <Save size={18} />
         保存模型配置
       </button>
@@ -957,45 +1066,7 @@ function ModelSettings({
             />
             OpenRouter 走系统代理
           </label>
-          <section className="model-manager">
-            <div className="model-manager-heading">
-              <div>
-                <h3>模型</h3>
-                <p>添加常用模型，然后在上方默认模型里选择。</p>
-              </div>
-              <div className="model-add-row">
-                <input
-                  value={newModelName}
-                  placeholder="例如 openai/gpt-4.1-mini"
-                  onChange={(event) => setNewModelName(event.currentTarget.value)}
-                />
-                <button className="secondary-button" type="button" onClick={addOpenRouterModel}>
-                  <Plus size={16} />
-                  添加模型
-                </button>
-              </div>
-            </div>
-            <div className="model-list">
-              {openrouterModels.length === 0 && <p className="empty-model-list">还没有模型。</p>}
-              {openrouterModels.map((model) => (
-                <article className={model === draft.openrouter_model ? "model-row active" : "model-row"} key={model}>
-                  <div>
-                    <strong>{model}</strong>
-                    <span>{model === draft.openrouter_model ? "当前文本模型" : "自定义"}</span>
-                  </div>
-                  <div className="model-row-actions">
-                    <IconButton label="删除模型" onClick={() => deleteOpenRouterModel(model)}>
-                      <Trash2 size={16} />
-                    </IconButton>
-                    <button className="secondary-button" type="button" onClick={() => selectOpenRouterModel(model)}>
-                      <CheckCircle2 size={16} />
-                      设为当前
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
+          {renderModelManager("openrouter", "例如 openai/gpt-4.1-mini")}
         </ProviderModal>
       )}
 
@@ -1003,7 +1074,7 @@ function ModelSettings({
         <ProviderModal title="DeepSeek" onClose={() => setEditingProvider(null)} onTest={() => testTextProvider("deepseek")}>
           <TextField label="API Key" value={draft.deepseek_api_key} type="password" onChange={(deepseek_api_key) => setDraft({ ...draft, deepseek_api_key })} />
           <TextField label="Base URL" value={draft.deepseek_base_url} onChange={(deepseek_base_url) => setDraft({ ...draft, deepseek_base_url })} />
-          <TextField label="模型" value={draft.deepseek_model} onChange={(deepseek_model) => setDraft({ ...draft, deepseek_model })} />
+          {renderModelManager("deepseek", "例如 deepseek-chat")}
           <button className="secondary-button" type="button" onClick={() => setDraft({ ...draft, optimize_provider: "deepseek" })}>
             <CheckCircle2 size={16} />
             设为当前模型
@@ -1016,7 +1087,7 @@ function ModelSettings({
           <TextField label="名称" value={draft.custom_openai_provider_name} onChange={(custom_openai_provider_name) => setDraft({ ...draft, custom_openai_provider_name })} />
           <TextField label="API Key" value={draft.custom_openai_api_key} type="password" onChange={(custom_openai_api_key) => setDraft({ ...draft, custom_openai_api_key })} />
           <TextField label="Base URL" value={draft.custom_openai_base_url} onChange={(custom_openai_base_url) => setDraft({ ...draft, custom_openai_base_url })} />
-          <TextField label="模型" value={draft.custom_openai_model} onChange={(custom_openai_model) => setDraft({ ...draft, custom_openai_model })} />
+          {renderModelManager("custom_openai", "例如 gpt-4.1-mini")}
           <button className="secondary-button" type="button" onClick={() => setDraft({ ...draft, optimize_provider: "custom_openai" })}>
             <CheckCircle2 size={16} />
             设为当前模型
@@ -1551,9 +1622,19 @@ function shouldShowRecordSkeleton(record: SpeechRecord) {
   return record.asr_status === "pending" || record.optimize_status === "pending";
 }
 
-function normalizeModelList(settings: AppSettings) {
-  const models = settings.openrouter_models ?? [];
-  const selected = settings.openrouter_model.trim();
+function normalizeModelList(settings: AppSettings, provider: TextProviderKey) {
+  const models =
+    provider === "deepseek"
+      ? (settings.deepseek_models ?? [])
+      : provider === "custom_openai"
+        ? (settings.custom_openai_models ?? [])
+        : (settings.openrouter_models ?? []);
+  const selected =
+    provider === "deepseek"
+      ? settings.deepseek_model.trim()
+      : provider === "custom_openai"
+        ? settings.custom_openai_model.trim()
+        : settings.openrouter_model.trim();
   return Array.from(new Set([...models, selected].map((model) => model.trim()).filter(Boolean)));
 }
 
@@ -1579,20 +1660,20 @@ const cleanupModeOptions = [
 ];
 
 function buildTextModelOptions(settings: AppSettings) {
-  const options = normalizeModelList(settings).map((model) => ({
+  const options = normalizeModelList(settings, "openrouter").map((model) => ({
     value: `openrouter|${model}`,
     label: `${model} (OpenRouter)`,
   }));
-  if (settings.deepseek_model.trim()) {
+  for (const model of normalizeModelList(settings, "deepseek")) {
     options.push({
-      value: `deepseek|${settings.deepseek_model.trim()}`,
-      label: `${settings.deepseek_model.trim()} (DeepSeek)`,
+      value: `deepseek|${model}`,
+      label: `${model} (DeepSeek)`,
     });
   }
-  if (settings.custom_openai_model.trim()) {
+  for (const model of normalizeModelList(settings, "custom_openai")) {
     options.push({
-      value: `custom_openai|${settings.custom_openai_model.trim()}`,
-      label: `${settings.custom_openai_model.trim()} (${settings.custom_openai_provider_name || "Custom"})`,
+      value: `custom_openai|${model}`,
+      label: `${model} (${settings.custom_openai_provider_name || "Custom"})`,
     });
   }
   return options;
