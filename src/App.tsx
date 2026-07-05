@@ -87,11 +87,17 @@ export function App() {
   const [importingAudio, setImportingAudio] = useState(false);
   const importingAudioRef = useRef(false);
   const recordingRef = useRef(recording);
+  const settingsRef = useRef<AppSettings | null>(settings);
+  const shortcutHandledAtRef = useRef(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   useEffect(() => {
     recordingRef.current = recording;
   }, [recording]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   useEffect(() => {
     call<BootstrapData>("get_bootstrap")
@@ -112,11 +118,29 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    function triggerShortcut() {
+      const now = Date.now();
+      if (now - shortcutHandledAtRef.current < 300) return;
+      shortcutHandledAtRef.current = now;
+      toggleRecording();
+    }
+
+    function handleFocusedKeyDown(event: KeyboardEvent) {
+      if (event.repeat) return;
+      const activeShortcut = settingsRef.current?.global_shortcut ?? "RightAlt";
+      if (normalizeShortcutCode(event.code) !== activeShortcut) return;
+      event.preventDefault();
+      event.stopPropagation();
+      triggerShortcut();
+    }
+
+    window.addEventListener("keydown", handleFocusedKeyDown);
     const disposers = Promise.all([
       listen<string>("global-shortcut", () => {
-        toggleRecording();
+        triggerShortcut();
       }),
       listen<RecordingSession>("recording-state", (event) => {
+        recordingRef.current = event.payload;
         setRecording(event.payload);
       }),
       listen<SpeechRecord>("record-updated", (event) => {
@@ -128,6 +152,7 @@ export function App() {
     ]);
 
     return () => {
+      window.removeEventListener("keydown", handleFocusedKeyDown);
       disposers.then((items) => items.forEach((dispose) => dispose()));
     };
   }, []);

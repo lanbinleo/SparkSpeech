@@ -2159,20 +2159,9 @@ fn position_overlay(window: &WebviewWindow, expanded: bool) -> Result<(), String
         };
         let x = (size.width as f64 / scale - width) / 2.0;
         let y = size.height as f64 / scale - height - OVERLAY_BOTTOM_MARGIN;
-        let should_hide_for_resize = window
-            .is_visible()
-            .unwrap_or(false)
-            && window
-                .inner_size()
-                .map(|current| {
-                    let current_width = current.width as f64 / scale;
-                    let current_height = current.height as f64 / scale;
-                    (current_width - width).abs() > 1.0 || (current_height - height).abs() > 1.0
-                })
-                .unwrap_or(false);
-        if should_hide_for_resize {
-            let _ = window.hide();
-        }
+        window
+            .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+            .map_err(|error| error.to_string())?;
         window
             .set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
             .map_err(|error| error.to_string())?;
