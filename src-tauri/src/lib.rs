@@ -148,10 +148,8 @@ enum FastAsrOutcome {
 }
 
 const FAST_ASR_FINAL_WAIT_MS: u64 = 3000;
-const OVERLAY_COMPACT_WIDTH: f64 = 260.0;
-const OVERLAY_COMPACT_HEIGHT: f64 = 60.0;
-const OVERLAY_EXPANDED_WIDTH: f64 = 520.0;
-const OVERLAY_EXPANDED_HEIGHT: f64 = 132.0;
+const OVERLAY_WINDOW_WIDTH: f64 = 520.0;
+const OVERLAY_WINDOW_HEIGHT: f64 = 132.0;
 const OVERLAY_BOTTOM_MARGIN: f64 = 72.0;
 
 fn create_tray(app: &App) -> tauri::Result<()> {
@@ -2140,31 +2138,17 @@ fn hide_overlay_later(app: AppHandle) {
     });
 }
 
-fn position_overlay(window: &WebviewWindow, expanded: bool) -> Result<(), String> {
+fn position_overlay(window: &WebviewWindow, _expanded: bool) -> Result<(), String> {
     if let Some(monitor) = window
         .current_monitor()
         .map_err(|error| error.to_string())?
     {
         let size = monitor.size();
         let scale = monitor.scale_factor();
-        let width = if expanded {
-            OVERLAY_EXPANDED_WIDTH
-        } else {
-            OVERLAY_COMPACT_WIDTH
-        };
-        let height = if expanded {
-            OVERLAY_EXPANDED_HEIGHT
-        } else {
-            OVERLAY_COMPACT_HEIGHT
-        };
+        let width = OVERLAY_WINDOW_WIDTH;
+        let height = OVERLAY_WINDOW_HEIGHT;
         let x = (size.width as f64 / scale - width) / 2.0;
         let y = size.height as f64 / scale - height - OVERLAY_BOTTOM_MARGIN;
-        window
-            .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
-            .map_err(|error| error.to_string())?;
-        window
-            .set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
-            .map_err(|error| error.to_string())?;
         window
             .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
             .map_err(|error| error.to_string())?;
