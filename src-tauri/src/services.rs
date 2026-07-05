@@ -35,6 +35,12 @@ pub struct DoubaoUtterance {
     pub definite: bool,
 }
 
+pub struct RealtimeTranscriptionResult {
+    pub text: String,
+    pub log_id: Option<String>,
+    pub request_id: String,
+}
+
 pub async fn transcribe_audio(
     settings: &AppSettings,
     audio_path: &Path,
@@ -156,14 +162,14 @@ pub async fn transcribe_audio_stream<F, G>(
     send_delay_ms: u64,
     mut on_text: F,
     mut on_sent: G,
-) -> Result<(), String>
+) -> Result<RealtimeTranscriptionResult, String>
 where
     F: FnMut(String, Vec<DoubaoUtterance>) + Send + 'static,
     G: FnMut(usize, u64) + Send + 'static,
 {
     let request_id = Uuid::new_v4().to_string();
     let request = build_doubao_request(&settings, &request_id)?;
-    let (ws, _) = connect_async(request).await.map_err(|error| {
+    let (ws, response) = connect_async(request).await.map_err(|error| {
         let message = error.to_string();
         if message.contains("401") || message.contains("Unauthorized") {
             format!(
@@ -173,10 +179,16 @@ where
             message
         }
     })?;
+    let log_id = response
+        .headers()
+        .get("X-Tt-Logid")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
     let init_payload = doubao_init_payload(&settings);
     let (mut write, mut read) = ws.split();
 
     let reader = async move {
+        let mut latest_text = String::new();
         while let Some(message) = read.next().await {
             let message = message.map_err(|error| error.to_string())?;
             let Message::Binary(data) = message else {
@@ -185,6 +197,7 @@ where
             let response = parse_server_frame(data.as_ref())?;
             if let Some(text) = response.text {
                 if !text.trim().is_empty() {
+                    latest_text = text.clone();
                     on_text(text, response.utterances);
                 }
             }
@@ -192,7 +205,7 @@ where
                 break;
             }
         }
-        Ok::<(), String>(())
+        Ok::<String, String>(latest_text)
     };
 
     let writer = async move {
@@ -219,7 +232,9 @@ where
                 .await
                 .map_err(|error| error.to_string())?;
             on_sent(current.next_sample_index, current.end_ms);
-            let delay_ms = if current.send_delay_ms == 0 {
+            let delay_ms = if receiver.is_closed() {
+                current.send_delay_ms.min(DOUBAO_FAST_SEND_DELAY_MS)
+            } else if current.send_delay_ms == 0 {
                 send_delay_ms
             } else {
                 current.send_delay_ms
@@ -235,8 +250,12 @@ where
         Ok::<(), String>(())
     };
 
-    try_join(writer, reader).await?;
-    Ok(())
+    let (_, text) = try_join(writer, reader).await?;
+    Ok(RealtimeTranscriptionResult {
+        text,
+        log_id,
+        request_id,
+    })
 }
 
 pub async fn optimize_text(

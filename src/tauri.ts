@@ -4,10 +4,12 @@ export type AppSettings = {
   global_shortcut: string;
   auto_paste: boolean;
   recording_retention_days: number;
+  recording_segment_seconds: number;
   microphone_name: string;
   theme: string;
   save_logs: boolean;
   launch_at_startup: boolean;
+  fast_asr_finalize: boolean;
   show_realtime_transcript: boolean;
   doubao_auth_mode: string;
   doubao_api_key: string;
@@ -141,10 +143,12 @@ const fallback: BootstrapData = {
     global_shortcut: "RightAlt",
     auto_paste: true,
     recording_retention_days: 7,
+    recording_segment_seconds: 10,
     microphone_name: "",
     theme: "system",
     save_logs: true,
     launch_at_startup: false,
+    fast_asr_finalize: false,
     show_realtime_transcript: false,
     doubao_auth_mode: "api_key",
     doubao_api_key: "",

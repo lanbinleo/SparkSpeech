@@ -133,7 +133,7 @@ npm run release:check -- 0.1.1
 6. For local installer verification, run:
 
 ```powershell
-npm run release:check -- 0.1.1 -BuildInstaller
+powershell -ExecutionPolicy Bypass -File scripts/release.ps1 0.1.1 -BuildInstaller
 ```
 
 7. Review the diff.
@@ -159,13 +159,71 @@ npm run release:check -- 0.1.1 -Tag -PushTag
 
 ## Manual Local Release Build
 
-Use this only for local artifact verification:
+Use this for local artifact verification:
 
 ```powershell
-npm run release:check -- 0.1.1 -BuildInstaller
+powershell -ExecutionPolicy Bypass -File scripts/release.ps1 0.1.1 -BuildInstaller
 ```
 
 The local build should create installers under `src-tauri\target\release\bundle\`.
+
+## Manual GitHub Release Upload
+
+Use this when GitHub Actions is too slow and the release should be built on the local Windows machine.
+
+Prerequisites:
+
+- `gh auth status` succeeds for `lanbinleo/SparkSpeech`.
+- Local updater signing files exist:
+  - `%USERPROFILE%\.tauri\sparkspeech-updater.key`
+  - `%USERPROFILE%\.tauri\sparkspeech-updater.key.password.txt`
+- The release branch has been merged into `main`, and local `main` contains the release commit.
+
+Recommended flow:
+
+```powershell
+$version = "0.1.4"
+$tag = "v$version"
+$bundle = "src-tauri/target/release/bundle"
+$nsis = "SparkSpeech_${version}_x64-setup.exe"
+$msi = "SparkSpeech_${version}_x64_en-US.msi"
+$base = "https://github.com/lanbinleo/SparkSpeech/releases/download/$tag"
+
+git checkout main
+git pull
+powershell -ExecutionPolicy Bypass -File scripts/release.ps1 $version -BuildInstaller
+
+$nsisSig = (Get-Content -LiteralPath "$bundle/nsis/$nsis.sig" -Raw).Trim()
+$msiSig = (Get-Content -LiteralPath "$bundle/msi/$msi.sig" -Raw).Trim()
+$latest = [ordered]@{
+  version = $version
+  notes = "See the release notes in the repository."
+  pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+  platforms = [ordered]@{
+    "windows-x86_64" = [ordered]@{ signature = $nsisSig; url = "$base/$nsis" }
+    "windows-x86_64-nsis" = [ordered]@{ signature = $nsisSig; url = "$base/$nsis" }
+    "windows-x86_64-msi" = [ordered]@{ signature = $msiSig; url = "$base/$msi" }
+  }
+}
+$latest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$bundle/latest.json" -Encoding UTF8
+
+gh workflow disable release.yml --repo lanbinleo/SparkSpeech
+powershell -ExecutionPolicy Bypass -File scripts/release.ps1 $version -Tag -PushTag
+
+gh release create $tag `
+  "$bundle/nsis/$nsis" `
+  "$bundle/nsis/$nsis.sig" `
+  "$bundle/msi/$msi" `
+  "$bundle/msi/$msi.sig" `
+  "$bundle/latest.json" `
+  --repo lanbinleo/SparkSpeech `
+  --title "SparkSpeech $tag" `
+  --notes-file "docs/release-$version.md"
+
+gh workflow enable release.yml --repo lanbinleo/SparkSpeech
+```
+
+After upload, confirm the Release page contains the NSIS installer, MSI installer, both updater `.sig` files, and `latest.json`.
 
 ## Local Data Migration
 
