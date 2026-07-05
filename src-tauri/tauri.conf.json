@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SparkSpeech",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "com.leo.sparkspeech",
   "build": {
     "frontendDist": "../dist",
@@ -25,8 +25,8 @@
         "label": "overlay",
         "title": "SparkSpeech Overlay",
         "url": "/?overlay=1",
-        "width": 260,
-        "height": 60,
+        "width": 520,
+        "height": 132,
         "resizable": false,
         "decorations": false,
         "shadow": false,

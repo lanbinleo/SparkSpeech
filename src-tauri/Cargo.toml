@@ -1,6 +1,6 @@
 [package]
 name = "sparkspeech"
-version = "0.1.5"
+version = "0.1.6"
 description = "Personal Windows voice input tool"
 authors = ["Leo"]
 license = ""

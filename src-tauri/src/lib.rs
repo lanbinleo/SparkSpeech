@@ -148,6 +148,9 @@ enum FastAsrOutcome {
 }
 
 const FAST_ASR_FINAL_WAIT_MS: u64 = 3000;
+const OVERLAY_WINDOW_WIDTH: f64 = 520.0;
+const OVERLAY_WINDOW_HEIGHT: f64 = 132.0;
+const OVERLAY_BOTTOM_MARGIN: f64 = 72.0;
 
 fn create_tray(app: &App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open-main", "打开主界面", true, None::<&str>)?;
@@ -1768,11 +1771,6 @@ fn update_realtime_transcript(
         return;
     }
     let settings = storage::get_settings(app).unwrap_or_default();
-    let lines = if settings.show_realtime_transcript {
-        transcript_preview_lines(text)
-    } else {
-        Vec::new()
-    };
     if let Some(state) = app.try_state::<AppState>() {
         let transcript_segments = utterances
             .into_iter()
@@ -1783,6 +1781,19 @@ fn update_realtime_transcript(
                 definite: utterance.definite,
             })
             .collect::<Vec<_>>();
+        let incoming_text = realtime_preview_text(text, &transcript_segments);
+        let preview_text = if let Ok(mut realtime_text) = state.realtime_text.lock() {
+            let merged = merge_realtime_text(&realtime_text, &incoming_text);
+            *realtime_text = merged.clone();
+            merged
+        } else {
+            incoming_text
+        };
+        let lines = if settings.show_realtime_transcript {
+            transcript_preview_lines(&preview_text)
+        } else {
+            Vec::new()
+        };
         if let Ok(session_id) = state.active_session_id.lock().map(|value| value.clone()) {
             if let Some(session_id) = session_id {
                 let _ = storage::append_realtime_transcript_segments(
@@ -1794,9 +1805,6 @@ fn update_realtime_transcript(
         }
         if let Ok(mut transcript) = state.realtime_transcript.lock() {
             *transcript = lines.clone();
-        }
-        if let Ok(mut realtime_text) = state.realtime_text.lock() {
-            *realtime_text = text.trim().to_string();
         }
         if let Ok(mut overlay) = state.overlay.lock() {
             overlay.transcript_lines = lines;
@@ -1993,6 +2001,53 @@ fn transcript_preview_lines(text: &str) -> Vec<String> {
     vec![chars[start..].iter().collect::<String>()]
 }
 
+fn realtime_preview_text(text: &str, segments: &[RealtimeTranscriptSegment]) -> String {
+    let mut ordered_segments = segments.iter().collect::<Vec<_>>();
+    ordered_segments.sort_by_key(|segment| (segment.start_ms, segment.end_ms));
+    let mut preview = String::new();
+    for segment in ordered_segments {
+        append_text_fragment(&mut preview, &segment.text);
+    }
+    if preview.trim().is_empty() {
+        text.trim().to_string()
+    } else {
+        preview
+    }
+}
+
+fn merge_realtime_text(previous: &str, incoming: &str) -> String {
+    let previous = previous.trim();
+    let incoming = incoming.trim();
+    if incoming.is_empty() {
+        return previous.to_string();
+    }
+    if previous.is_empty() || incoming.starts_with(previous) {
+        return incoming.to_string();
+    }
+    if previous.ends_with(incoming) {
+        return previous.to_string();
+    }
+    let mut merged = previous.to_string();
+    append_text_fragment(&mut merged, incoming);
+    merged
+}
+
+fn append_text_fragment(target: &mut String, fragment: &str) {
+    let fragment = fragment.trim();
+    if fragment.is_empty() {
+        return;
+    }
+    if target.ends_with(fragment) {
+        return;
+    }
+    if let (Some(left), Some(right)) = (target.chars().last(), fragment.chars().next()) {
+        if left.is_ascii_alphanumeric() && right.is_ascii_alphanumeric() {
+            target.push(' ');
+        }
+    }
+    target.push_str(fragment);
+}
+
 fn overlay_state_transcript_lines(app_state: &State<'_, AppState>) -> Vec<String> {
     app_state
         .realtime_transcript
@@ -2083,20 +2138,17 @@ fn hide_overlay_later(app: AppHandle) {
     });
 }
 
-fn position_overlay(window: &WebviewWindow, expanded: bool) -> Result<(), String> {
+fn position_overlay(window: &WebviewWindow, _expanded: bool) -> Result<(), String> {
     if let Some(monitor) = window
         .current_monitor()
         .map_err(|error| error.to_string())?
     {
         let size = monitor.size();
         let scale = monitor.scale_factor();
-        let width = if expanded { 560.0 } else { 260.0 };
-        let height = if expanded { 160.0 } else { 60.0 };
+        let width = OVERLAY_WINDOW_WIDTH;
+        let height = OVERLAY_WINDOW_HEIGHT;
         let x = (size.width as f64 / scale - width) / 2.0;
-        let y = size.height as f64 / scale - height - 52.0;
-        window
-            .set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
-            .map_err(|error| error.to_string())?;
+        let y = size.height as f64 / scale - height - OVERLAY_BOTTOM_MARGIN;
         window
             .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
             .map_err(|error| error.to_string())?;
