@@ -102,13 +102,14 @@ When preparing and publishing a SparkSpeech release:
 10. Do not stop at PR creation when the user asked to publish. Merge the PR into `main` after checks are acceptable.
 11. After merge, switch to `main`, pull, and create an annotated tag such as `v0.1.2`.
 12. Do not rely on the GitHub Actions release workflow for building or publishing. The release workflow is too slow for this project flow; build the release artifacts locally and publish them manually.
-13. Push the tag only when the local artifacts are ready to upload. If pushing the tag starts a GitHub Actions release workflow, cancel that workflow.
-14. Create or update the GitHub Release manually from the local artifacts and confirm it includes:
+13. Do not manually trigger the release workflow unless Leo explicitly requests it. The workflow is a backup path only.
+14. Push the tag only when the local artifacts are ready to upload. The release workflow is manual-only, so tags should not start cloud builds.
+15. Create or update the GitHub Release manually from the local artifacts and confirm it includes:
    - NSIS installer
    - MSI installer
    - updater `.sig` files
    - `latest.json`
-15. Report the Release URL, PR URL, tag, and any non-blocking workflow warnings.
+16. Report the Release URL, PR URL, tag, and any non-blocking workflow warnings.
 
 ## Safe Verification
 
