@@ -1193,7 +1193,7 @@ function AppSettingsView({
   settings: AppSettings;
   onSave: (settings: AppSettings) => Promise<void>;
 }) {
-  const [activeSettingsTab, setActiveSettingsTab] = useState<"recording" | "appearance" | "logs" | "about">("recording");
+  const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "recording" | "logs" | "about">("general");
   const [microphones, setMicrophones] = useState<string[]>([]);
   const [logs, setLogs] = useState("");
   const [capturingShortcut, setCapturingShortcut] = useState(false);
@@ -1267,11 +1267,11 @@ function AppSettingsView({
   return (
     <section className="settings-page settings-tabs-page">
       <div className="settings-tab-list" role="tablist" aria-label="设置分类">
+        <button className={activeSettingsTab === "general" ? "active" : ""} type="button" onClick={() => setActiveSettingsTab("general")}>
+          通用
+        </button>
         <button className={activeSettingsTab === "recording" ? "active" : ""} type="button" onClick={() => setActiveSettingsTab("recording")}>
           录音
-        </button>
-        <button className={activeSettingsTab === "appearance" ? "active" : ""} type="button" onClick={() => setActiveSettingsTab("appearance")}>
-          外观
         </button>
         <button className={activeSettingsTab === "logs" ? "active" : ""} type="button" onClick={() => setActiveSettingsTab("logs")}>
           日志
@@ -1280,6 +1280,67 @@ function AppSettingsView({
           关于
         </button>
       </div>
+
+      {activeSettingsTab === "general" && (
+        <div className="settings-section">
+          <div className="section-heading">
+            <h2>通用</h2>
+            <p>设置启动、粘贴和界面显示方式。</p>
+          </div>
+          <div className="field-grid">
+            <div className="theme-buttons" role="group" aria-label="主题">
+              <button
+                className={settings.theme === "system" ? "active" : ""}
+                type="button"
+                onClick={() => {
+                  const next = { ...settings, theme: "system" };
+                  onChange(next);
+                  onSave(next);
+                }}
+              >
+                <Monitor size={16} />
+                跟随系统
+              </button>
+              <button
+                className={settings.theme === "light" ? "active" : ""}
+                type="button"
+                onClick={() => {
+                  const next = { ...settings, theme: "light" };
+                  onChange(next);
+                  onSave(next);
+                }}
+              >
+                <Sun size={16} />
+                浅色
+              </button>
+              <button
+                className={settings.theme === "dark" ? "active" : ""}
+                type="button"
+                onClick={() => {
+                  const next = { ...settings, theme: "dark" };
+                  onChange(next);
+                  onSave(next);
+                }}
+              >
+                <Moon size={16} />
+                深色
+              </button>
+            </div>
+            <SettingsSwitch
+              checked={settings.auto_paste}
+              title="整理成功后自动粘贴"
+              description="整理完成后直接粘贴到当前光标位置。"
+              onChange={(checked) => onChange({ ...settings, auto_paste: checked })}
+            />
+            <SettingsSwitch
+              checked={settings.launch_at_startup}
+              title="开机自启动"
+              description="登录 Windows 后自动启动 SparkSpeech。"
+              onChange={(checked) => onChange({ ...settings, launch_at_startup: checked })}
+            />
+          </div>
+        </div>
+      )}
 
       {activeSettingsTab === "recording" && (
         <div className="settings-section">
@@ -1350,70 +1411,9 @@ function AppSettingsView({
             description="录音时在底部状态条显示临时识别文本。"
             onChange={(checked) => onChange({ ...settings, show_realtime_transcript: checked })}
           />
-          <SettingsSwitch
-            checked={settings.auto_paste}
-            title="整理成功后自动粘贴"
-            description="整理完成后直接粘贴到当前光标位置。"
-            onChange={(checked) => onChange({ ...settings, auto_paste: checked })}
-          />
-          <SettingsSwitch
-            checked={settings.launch_at_startup}
-            title="开机自启动"
-            description="登录 Windows 后自动启动 SparkSpeech。"
-            onChange={(checked) => onChange({ ...settings, launch_at_startup: checked })}
-          />
         </div>
         {micTestStatus && <div className="inline-alert neutral"><CheckCircle2 size={16} />{micTestStatus}</div>}
         {micSampleSrc && <audio className="audio-preview" controls src={micSampleSrc} />}
-      </div>
-      )}
-
-      {activeSettingsTab === "appearance" && (
-        <div className="settings-section">
-        <div className="section-heading">
-          <h2>外观</h2>
-          <p>选择界面主题。</p>
-        </div>
-        <div className="field-grid">
-          <div className="theme-buttons" role="group" aria-label="主题">
-            <button
-              className={settings.theme === "system" ? "active" : ""}
-              type="button"
-              onClick={() => {
-                const next = { ...settings, theme: "system" };
-                onChange(next);
-                onSave(next);
-              }}
-            >
-              <Monitor size={16} />
-              跟随系统
-            </button>
-            <button
-              className={settings.theme === "light" ? "active" : ""}
-              type="button"
-              onClick={() => {
-                const next = { ...settings, theme: "light" };
-                onChange(next);
-                onSave(next);
-              }}
-            >
-              <Sun size={16} />
-              浅色
-            </button>
-            <button
-              className={settings.theme === "dark" ? "active" : ""}
-              type="button"
-              onClick={() => {
-                const next = { ...settings, theme: "dark" };
-                onChange(next);
-                onSave(next);
-              }}
-            >
-              <Moon size={16} />
-              深色
-            </button>
-          </div>
-        </div>
       </div>
       )}
 
