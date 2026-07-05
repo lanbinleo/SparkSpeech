@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  # Release artifacts are built locally and uploaded manually.
+  # Keep this workflow manual-only so pushing version tags does not start a cloud build.
   workflow_dispatch:
 
 permissions:
