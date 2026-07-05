@@ -48,6 +48,7 @@ type Toast = {
   message: string;
   tone?: "info" | "error" | "success";
 };
+type AutoSaveStatus = "idle" | "saving" | "saved" | "error";
 
 const statusLabel: Record<string, string> = {
   idle: "待命",
@@ -250,12 +251,20 @@ export function App() {
     showToast(record.error_message ?? "录音处理完成", record.error_message ? "error" : "success");
   }
 
-  async function saveSettings(next: AppSettings) {
+  async function saveSettings(
+    next: AppSettings,
+    options: { notify?: boolean; syncDraft?: boolean } = {},
+  ) {
     const saved = await call<AppSettings>("save_settings", { settings: next });
     setSettings(saved);
-    setSettingsDraft(saved);
+    if (options.syncDraft !== false) {
+      setSettingsDraft(saved);
+    }
     applyTheme(saved.theme);
-    showToast("设置已保存", "success");
+    if (options.notify !== false) {
+      showToast("设置已保存", "success");
+    }
+    return saved;
   }
 
   async function savePrompts(next: PromptSettings) {
@@ -407,12 +416,7 @@ export function App() {
             <h1>{activeTab === "home" ? "语音输入历史" : selectedTitle}</h1>
           </div>
           <div className="topbar-actions">
-            {activeTab === "settings" && settingsDraft ? (
-              <button className="primary-button" onClick={() => saveSettings(settingsDraft)}>
-                <Save size={18} />
-                保存设置
-              </button>
-            ) : activeTab === "preferences" && promptsDraft ? (
+            {activeTab === "settings" ? null : activeTab === "preferences" && promptsDraft ? (
               <button className="primary-button" onClick={() => savePrompts(promptsDraft)}>
                 <Save size={18} />
                 保存偏好
@@ -443,7 +447,7 @@ export function App() {
           )}
 
           {activeTab === "models" && settings && (
-            <ModelSettings settings={settings} onSave={saveSettings} />
+            <ModelSettings settings={settings} onSave={(next) => saveSettings(next, { notify: false, syncDraft: false })} />
           )}
 
           {activeTab === "preferences" && promptsDraft && (
@@ -454,7 +458,7 @@ export function App() {
             <AppSettingsView
               settings={settingsDraft ?? settings}
               onChange={setSettingsDraft}
-              onSave={saveSettings}
+              onSave={(next) => saveSettings(next, { notify: false, syncDraft: false })}
             />
           )}
         </div>
@@ -807,20 +811,43 @@ function ModelSettings({
   onSave,
 }: {
   settings: AppSettings;
-  onSave: (settings: AppSettings) => Promise<void>;
+  onSave: (settings: AppSettings) => Promise<AppSettings>;
 }) {
   const [draft, setDraft] = useState(settings);
   const [editingProvider, setEditingProvider] = useState<"doubao" | "openrouter" | "deepseek" | "custom_openai" | null>(null);
   const [testStatus, setTestStatus] = useState("");
   const [newModelName, setNewModelName] = useState("");
+  const [saveStatus, setSaveStatus] = useState<AutoSaveStatus>("idle");
+  const autoSaveReadyRef = useRef(false);
+  const onSaveRef = useRef(onSave);
   const openrouterModels = useMemo(() => normalizeModelList(draft, "openrouter"), [draft]);
   const deepseekModels = useMemo(() => normalizeModelList(draft, "deepseek"), [draft]);
   const customOpenAIModels = useMemo(() => normalizeModelList(draft, "custom_openai"), [draft]);
   const textModelOptions = useMemo(() => buildTextModelOptions(draft), [draft]);
 
   useEffect(() => {
-    setDraft(settings);
-  }, [settings]);
+    onSaveRef.current = onSave;
+  }, [onSave]);
+
+  useEffect(() => {
+    if (!autoSaveReadyRef.current) {
+      autoSaveReadyRef.current = true;
+      return;
+    }
+    const snapshot = {
+      ...draft,
+      openrouter_models: openrouterModels,
+      deepseek_models: deepseekModels,
+      custom_openai_models: customOpenAIModels,
+    };
+    setSaveStatus("saving");
+    const timer = window.setTimeout(() => {
+      onSaveRef.current(snapshot)
+        .then(() => setSaveStatus("saved"))
+        .catch(() => setSaveStatus("error"));
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [customOpenAIModels, deepseekModels, draft, openrouterModels]);
 
   async function testDoubao() {
     setTestStatus("正在检查豆包配置");
@@ -980,6 +1007,8 @@ function ModelSettings({
 
   return (
     <section className="settings-page provider-page">
+      <AutoSaveNotice status={saveStatus} />
+
       <section className="model-defaults">
         <header className="model-defaults-header">
           <Settings size={24} />
@@ -1054,21 +1083,6 @@ function ModelSettings({
       </div>
 
       {testStatus && <div className="inline-alert neutral"><CheckCircle2 size={16} />{testStatus}</div>}
-
-      <button
-        className="primary-button save-button"
-        onClick={() =>
-          onSave({
-            ...draft,
-            openrouter_models: openrouterModels,
-            deepseek_models: deepseekModels,
-            custom_openai_models: customOpenAIModels,
-          })
-        }
-      >
-        <Save size={18} />
-        保存模型配置
-      </button>
 
       {editingProvider === "doubao" && (
         <ProviderModal title="豆包流式 ASR" onClose={() => setEditingProvider(null)} onTest={testDoubao}>
@@ -1216,7 +1230,7 @@ function AppSettingsView({
 }: {
   onChange: (settings: AppSettings) => void;
   settings: AppSettings;
-  onSave: (settings: AppSettings) => Promise<void>;
+  onSave: (settings: AppSettings) => Promise<AppSettings>;
 }) {
   const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "recording" | "logs" | "about">("general");
   const [microphones, setMicrophones] = useState<string[]>([]);
@@ -1227,6 +1241,28 @@ function AppSettingsView({
   const [appVersion, setAppVersion] = useState("");
   const [updateStatus, setUpdateStatus] = useState("尚未检查更新");
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<AutoSaveStatus>("idle");
+  const autoSaveReadyRef = useRef(false);
+  const onSaveRef = useRef(onSave);
+
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
+
+  useEffect(() => {
+    if (!autoSaveReadyRef.current) {
+      autoSaveReadyRef.current = true;
+      return;
+    }
+    const snapshot = settings;
+    setSaveStatus("saving");
+    const timer = window.setTimeout(() => {
+      onSaveRef.current(snapshot)
+        .then(() => setSaveStatus("saved"))
+        .catch(() => setSaveStatus("error"));
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [settings]);
 
   useEffect(() => {
     call<string[]>("list_microphones")
@@ -1306,6 +1342,8 @@ function AppSettingsView({
         </button>
       </div>
 
+      <AutoSaveNotice status={saveStatus} />
+
       {activeSettingsTab === "general" && (
         <div className="settings-section">
           <div className="section-heading">
@@ -1320,7 +1358,7 @@ function AppSettingsView({
                 onClick={() => {
                   const next = { ...settings, theme: "system" };
                   onChange(next);
-                  onSave(next);
+                  applyTheme(next.theme);
                 }}
               >
                 <Monitor size={16} />
@@ -1332,7 +1370,7 @@ function AppSettingsView({
                 onClick={() => {
                   const next = { ...settings, theme: "light" };
                   onChange(next);
-                  onSave(next);
+                  applyTheme(next.theme);
                 }}
               >
                 <Sun size={16} />
@@ -1344,7 +1382,7 @@ function AppSettingsView({
                 onClick={() => {
                   const next = { ...settings, theme: "dark" };
                   onChange(next);
-                  onSave(next);
+                  applyTheme(next.theme);
                 }}
               >
                 <Moon size={16} />
@@ -1362,6 +1400,18 @@ function AppSettingsView({
               title="开机自启动"
               description="登录 Windows 后自动启动 SparkSpeech。"
               onChange={(checked) => onChange({ ...settings, launch_at_startup: checked })}
+            />
+            <SettingsSwitch
+              checked={settings.fast_asr_finalize}
+              title="快速完成转写（实验）"
+              description="录音时提前上传音频；若连接中断，结束后改用完整录音转写。"
+              onChange={(checked) => onChange({ ...settings, fast_asr_finalize: checked })}
+            />
+            <SettingsSwitch
+              checked={settings.show_realtime_transcript}
+              title="显示实时字幕预览"
+              description="录音时在底部状态条显示临时识别文本。"
+              onChange={(checked) => onChange({ ...settings, show_realtime_transcript: checked })}
             />
           </div>
         </div>
@@ -1424,18 +1474,6 @@ function AppSettingsView({
               ))}
             </select>
           </label>
-          <SettingsSwitch
-            checked={settings.fast_asr_finalize}
-            title="快速完成转写（实验）"
-            description="录音时提前上传音频；若连接中断，结束后改用完整录音转写。"
-            onChange={(checked) => onChange({ ...settings, fast_asr_finalize: checked })}
-          />
-          <SettingsSwitch
-            checked={settings.show_realtime_transcript}
-            title="显示实时字幕预览"
-            description="录音时在底部状态条显示临时识别文本。"
-            onChange={(checked) => onChange({ ...settings, show_realtime_transcript: checked })}
-          />
         </div>
         {micTestStatus && <div className="inline-alert neutral"><CheckCircle2 size={16} />{micTestStatus}</div>}
         {micSampleSrc && <audio className="audio-preview" controls src={micSampleSrc} />}
@@ -1612,6 +1650,17 @@ function SettingsSwitch({
       <i aria-hidden="true" />
     </label>
   );
+}
+
+function AutoSaveNotice({ status }: { status: AutoSaveStatus }) {
+  if (status === "idle") return null;
+  if (status === "saving") {
+    return <div className="inline-alert neutral"><RefreshCw size={16} />正在保存</div>;
+  }
+  if (status === "error") {
+    return <div className="inline-alert error"><AlertCircle size={16} />保存失败</div>;
+  }
+  return <div className="inline-alert neutral"><CheckCircle2 size={16} />已保存</div>;
 }
 
 function IconButton({

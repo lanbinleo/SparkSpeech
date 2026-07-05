@@ -1569,6 +1569,10 @@ textarea::-webkit-resizer {
   color: var(--success);
 }
 
+.inline-alert.error {
+  margin: 0;
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
