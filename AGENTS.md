@@ -101,9 +101,9 @@ When preparing and publishing a SparkSpeech release:
 9. Push the release branch and open a pull request into `main`, unless the user explicitly asks for a direct release.
 10. Do not stop at PR creation when the user asked to publish. Merge the PR into `main` after checks are acceptable.
 11. After merge, switch to `main`, pull, and create an annotated tag such as `v0.1.2`.
-12. Push the tag. The GitHub Actions release workflow builds and publishes the GitHub Release.
-13. Wait for the GitHub Actions release workflow to finish.
-14. Confirm the GitHub Release exists and includes:
+12. Do not rely on the GitHub Actions release workflow for building or publishing. The release workflow is too slow for this project flow; build the release artifacts locally and publish them manually.
+13. Push the tag only when the local artifacts are ready to upload. If pushing the tag starts a GitHub Actions release workflow, cancel that workflow.
+14. Create or update the GitHub Release manually from the local artifacts and confirm it includes:
    - NSIS installer
    - MSI installer
    - updater `.sig` files
