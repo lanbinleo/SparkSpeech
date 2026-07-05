@@ -1,7 +1,6 @@
 use std::{
     sync::{
-        atomic::AtomicU32,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, OnceLock,
     },
     thread,
@@ -18,14 +17,15 @@ use windows::Win32::{
         },
         WindowsAndMessaging::{
             CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-            UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYUP, WM_QUIT,
-            WM_SYSKEYUP,
+            UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+            WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     },
 };
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static TARGET_VK: AtomicU32 = AtomicU32::new(0);
+static TARGET_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 
 pub struct ShortcutHandle {
     thread_id: u32,
@@ -46,6 +46,7 @@ pub fn register(app: AppHandle, shortcut: &str) -> Result<ShortcutHandle, String
 
     let _ = APP_HANDLE.set(app.clone());
     TARGET_VK.store(vk_code, Ordering::SeqCst);
+    TARGET_KEY_DOWN.store(false, Ordering::SeqCst);
     let stopped = Arc::new(AtomicBool::new(false));
     let stopped_in_thread = stopped.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u32, String>>();
@@ -78,11 +79,19 @@ pub fn register(app: AppHandle, shortcut: &str) -> Result<ShortcutHandle, String
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && (wparam.0 as u32 == WM_KEYUP || wparam.0 as u32 == WM_SYSKEYUP) {
+    if code >= 0 {
         let event = *(lparam.0 as *const KBDLLHOOKSTRUCT);
         if event.vkCode == TARGET_VK.load(Ordering::SeqCst) {
-            if let Some(app) = APP_HANDLE.get() {
-                let _ = app.emit("global-shortcut", "toggle-recording");
+            let message = wparam.0 as u32;
+            if message == WM_KEYDOWN || message == WM_SYSKEYDOWN {
+                let was_down = TARGET_KEY_DOWN.swap(true, Ordering::SeqCst);
+                if !was_down {
+                    if let Some(app) = APP_HANDLE.get() {
+                        let _ = app.emit("global-shortcut", "toggle-recording");
+                    }
+                }
+            } else if message == WM_KEYUP || message == WM_SYSKEYUP {
+                TARGET_KEY_DOWN.store(false, Ordering::SeqCst);
             }
         }
     }

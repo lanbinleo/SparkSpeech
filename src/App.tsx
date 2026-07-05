@@ -86,7 +86,12 @@ export function App() {
   const [draggingFile, setDraggingFile] = useState(false);
   const [importingAudio, setImportingAudio] = useState(false);
   const importingAudioRef = useRef(false);
+  const recordingRef = useRef(recording);
   const [toasts, setToasts] = useState<Toast[]>([]);
+
+  useEffect(() => {
+    recordingRef.current = recording;
+  }, [recording]);
 
   useEffect(() => {
     call<BootstrapData>("get_bootstrap")
@@ -125,7 +130,7 @@ export function App() {
     return () => {
       disposers.then((items) => items.forEach((dispose) => dispose()));
     };
-  });
+  }, []);
 
   useEffect(() => {
     if (!recording.active || !recording.started_at) return;
@@ -198,15 +203,24 @@ export function App() {
   }
 
   async function toggleRecording() {
-    if (!recording.active) {
+    const currentRecording = recordingRef.current;
+    if (!currentRecording.active) {
       const next = await call<RecordingSession>("start_recording");
       setRecording(next);
+      recordingRef.current = next;
       showToast("录音已开始", "success");
       return;
     }
 
+    if (currentRecording.status !== "recording") {
+      showToast("上一段录音还在处理，暂不支持同时录制", "info");
+      return;
+    }
+
     const record = await call<SpeechRecord>("stop_recording");
-    setRecording({ active: false, started_at: null, status: "idle", elapsed_ms: 0 });
+    const idleRecording: RecordingSession = { active: false, started_at: null, status: "idle", elapsed_ms: 0 };
+    setRecording(idleRecording);
+    recordingRef.current = idleRecording;
     mergeRecord(record);
     showToast(record.error_message ?? "录音处理完成", record.error_message ? "error" : "success");
   }
