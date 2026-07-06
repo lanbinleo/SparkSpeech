@@ -51,6 +51,7 @@ export type SpeechRecord = {
   raw_asr_text: string;
   final_text: string;
   audio_path?: string | null;
+  audio_status: string;
   duration_ms?: number | null;
   audio_expires_at?: string | null;
   asr_status: string;
@@ -308,6 +309,7 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
       raw_asr_text: "这是一条本地模拟的 ASR 原文。",
       final_text: "这是一条本地模拟的 ASR 原文。",
       audio_path: null,
+      audio_status: "expired",
       duration_ms: 5200,
       audio_expires_at: null,
       asr_status: "mocked",
@@ -333,6 +335,7 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
       raw_asr_text: "这是拖拽导入音频的本地模拟 ASR 原文。",
       final_text: "这是拖拽导入音频的本地模拟 ASR 原文。",
       audio_path: String(args?.path ?? ""),
+      audio_status: "saved",
       duration_ms: 5200,
       audio_expires_at: null,
       asr_status: "mocked",

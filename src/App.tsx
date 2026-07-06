@@ -55,15 +55,22 @@ const statusLabel: Record<string, string> = {
   recording: "正在录音",
   processing: "整理中",
   pending: "等待处理",
-  saving: "保存录音",
   transcribing: "文字转写中",
   optimizing: "内容优化中",
   completed: "完成",
   mocked: "本地模拟",
   failed: "失败",
-  blocked: "等待转写",
+  blocked: "无法继续",
   recovered: "已恢复录音",
   no_speech: "没有录音",
+};
+
+const audioStatusLabel: Record<string, string> = {
+  pending: "正在保存",
+  saved: "已保存",
+  save_failed: "保存失败",
+  expired: "已过期",
+  missing: "文件缺失",
 };
 
 const pageSize = 60;
@@ -553,6 +560,7 @@ function HomeView({
                 )}
                 <div className="record-meta-line">
                   <span>{formatDate(record.created_at)}</span>
+                  {record.audio_status !== "saved" && <span>录音：{formatAudioStatus(record)}</span>}
                   <span>{statusLabel[record.asr_status] ?? record.asr_status}</span>
                   {record.duration_ms && <span>{formatDuration(record.duration_ms)}</span>}
                   {record.error_message && <span className="record-error">{record.error_message}</span>}
@@ -738,6 +746,7 @@ function RecordDetailsModal({
         </header>
 
         <div className="detail-status">
+          <span>录音：{formatAudioStatus(record)}</span>
           <span>ASR：{statusLabel[record.asr_status] ?? record.asr_status}</span>
           <span>优化：{statusLabel[record.optimize_status] ?? record.optimize_status}</span>
           {record.duration_ms && <span>时长：{formatDuration(record.duration_ms)}</span>}
@@ -1706,8 +1715,15 @@ function buildStats(records: SpeechRecord[]): HomeStats {
 function shouldShowRecordSkeleton(record: SpeechRecord) {
   if ((record.final_text || record.raw_asr_text).trim()) return false;
   if (record.error_message) return false;
+  if (!record.audio_path && record.audio_status !== "pending") return false;
   if (record.asr_status === "no_speech" || record.asr_status === "failed") return false;
   return record.asr_status === "pending" || record.optimize_status === "pending";
+}
+
+function formatAudioStatus(record: SpeechRecord) {
+  if (!record.audio_status && record.audio_path) return audioStatusLabel.saved;
+  if (!record.audio_status) return audioStatusLabel.expired;
+  return audioStatusLabel[record.audio_status] ?? record.audio_status;
 }
 
 function normalizeModelList(settings: AppSettings, provider: TextProviderKey) {

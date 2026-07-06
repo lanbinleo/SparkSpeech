@@ -112,6 +112,8 @@ pub struct SpeechRecord {
     pub raw_asr_text: String,
     pub final_text: String,
     pub audio_path: Option<String>,
+    #[serde(default)]
+    pub audio_status: String,
     pub duration_ms: Option<u64>,
     pub audio_expires_at: Option<String>,
     pub asr_status: String,
