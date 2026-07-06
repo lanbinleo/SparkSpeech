@@ -35,6 +35,9 @@ pub fn save_prompts(app: &AppHandle, prompts: &PromptSettings) -> Result<(), Str
 
 pub fn read_records(app: &AppHandle) -> Result<Vec<SpeechRecord>, String> {
     let mut records = read_json::<Vec<SpeechRecord>>(&records_path(app)?)?;
+    for record in &mut records {
+        normalize_record_audio_status(record);
+    }
     records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(records)
 }
@@ -290,6 +293,7 @@ pub fn recover_interrupted_recording_sessions(
             raw_asr_text: String::new(),
             final_text: String::new(),
             audio_path: Some(path_to_string(&audio_path)),
+            audio_status: "saved".into(),
             duration_ms: Some(audio.duration_ms()),
             audio_expires_at: Some(
                 (now + Duration::days(settings.recording_retention_days)).to_rfc3339(),
@@ -351,6 +355,7 @@ pub fn cleanup_expired_recording_files(app: &AppHandle) -> Result<usize, String>
             ),
         );
         record.audio_path = None;
+        record.audio_status = "expired".into();
         record.audio_expires_at = None;
         record.updated_at = now.to_rfc3339();
         removed += 1;
@@ -359,6 +364,25 @@ pub fn cleanup_expired_recording_files(app: &AppHandle) -> Result<usize, String>
         save_records(app, &records)?;
     }
     Ok(removed)
+}
+
+fn normalize_record_audio_status(record: &mut SpeechRecord) {
+    if !record.audio_status.trim().is_empty() {
+        return;
+    }
+
+    record.audio_status = if record.audio_path.is_some() {
+        "saved".into()
+    } else if record
+        .error_message
+        .as_deref()
+        .map(|message| message.contains("录音保存失败"))
+        .unwrap_or(false)
+    {
+        "save_failed".into()
+    } else {
+        "expired".into()
+    };
 }
 
 pub fn ensure_daily_backup(app: &AppHandle) -> Result<(), String> {

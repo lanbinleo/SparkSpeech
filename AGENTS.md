@@ -45,10 +45,10 @@ Use these commands from the repository root:
 ```powershell
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
-npm run tauri:build -- --no-bundle
+cargo build --manifest-path src-tauri/Cargo.toml --release --features tauri/custom-protocol
 ```
 
-The npm/Tauri command currently still creates MSI and NSIS bundles even when `--no-bundle` is passed through npm.
+Do not use `npm run tauri:build` for ordinary local compilation. Tauri does not provide the app's normal local build path in this project; that command enters installer/updater bundling and signing behavior and can fail without release signing keys.
 
 ## Branching and Commits
 
@@ -89,7 +89,7 @@ When preparing and publishing a SparkSpeech release:
    - `npm run build`
    - `cargo check --manifest-path src-tauri/Cargo.toml`
    - `cargo test --manifest-path src-tauri/Cargo.toml`
-   - `npm run tauri:build` with updater signing environment variables available when verifying installer signing locally.
+   - Use `npm run release:check -- x.y.z -BuildInstaller` when verifying installer signing locally; do not call `npm run tauri:build` directly.
 6. Confirm release artifacts exist after installer verification:
    - `src-tauri/target/release/sparkspeech.exe`
    - `src-tauri/target/release/bundle/nsis/SparkSpeech_x.y.z_x64-setup.exe`
@@ -115,7 +115,8 @@ When preparing and publishing a SparkSpeech release:
 
 - For frontend changes, run `npm run build`.
 - For Rust/native changes, run `cargo check --manifest-path src-tauri/Cargo.toml`.
-- For release work, run the full Tauri build.
+- For local release-mode compilation, run `npm run build` and `cargo build --manifest-path src-tauri/Cargo.toml --release --features tauri/custom-protocol`.
+- For release work that needs installers or updater signatures, use the release script instead of calling `npm run tauri:build` directly.
 - For global shortcut, tray, microphone, clipboard, and auto-paste behavior, note that some verification requires a real Windows desktop session.
 - If a release build cannot overwrite `sparkspeech.exe`, check whether a local SparkSpeech process is running before rebuilding.
 

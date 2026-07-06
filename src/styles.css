@@ -884,7 +884,6 @@ textarea::-webkit-resizer {
   transform: translateX(-50%);
 }
 
-.recording-pill.saving,
 .recording-pill.transcribing,
 .recording-pill.optimizing {
   min-width: 0;
@@ -983,7 +982,6 @@ textarea::-webkit-resizer {
 }
 
 .recording-pill.recording .overlay-progress-text,
-.recording-pill.saving .overlay-progress-text,
 .recording-pill.transcribing .overlay-progress-text,
 .recording-pill.optimizing .overlay-progress-text {
   min-width: 0;

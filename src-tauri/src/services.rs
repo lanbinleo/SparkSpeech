@@ -1,4 +1,4 @@
-use std::{io::Write, path::Path};
+use std::{io::Write, path::Path, time::Instant};
 
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{future::try_join, SinkExt, StreamExt};
@@ -20,6 +20,20 @@ use crate::{
 const DOUBAO_AUDIO_CHUNK_MS: usize = 200;
 const DOUBAO_FAST_SEND_DELAY_MS: u64 = 10;
 
+pub struct TimedTranscriptionResult {
+    pub text: String,
+    pub log_id: Option<String>,
+    pub request_id: String,
+    pub ttft_ms: Option<u128>,
+    pub total_ms: u128,
+}
+
+pub struct TimedTextResult {
+    pub text: String,
+    pub ttft_ms: Option<u128>,
+    pub total_ms: u128,
+}
+
 pub struct RealtimeAudioChunk {
     pub pcm_16k: Vec<i16>,
     pub next_sample_index: usize,
@@ -39,12 +53,14 @@ pub struct RealtimeTranscriptionResult {
     pub text: String,
     pub log_id: Option<String>,
     pub request_id: String,
+    pub ttft_ms: Option<u128>,
+    pub total_ms: u128,
 }
 
 pub async fn transcribe_audio(
     settings: &AppSettings,
     audio_path: &Path,
-) -> Result<(String, Option<String>, String), String> {
+) -> Result<TimedTranscriptionResult, String> {
     transcribe_audio_with_progress(settings, audio_path, |_current_ms, _total_ms| {}).await
 }
 
@@ -52,10 +68,11 @@ pub async fn transcribe_audio_with_progress<F>(
     settings: &AppSettings,
     audio_path: &Path,
     mut on_progress: F,
-) -> Result<(String, Option<String>, String), String>
+) -> Result<TimedTranscriptionResult, String>
 where
     F: FnMut(u64, u64) + Send,
 {
+    let started_at = Instant::now();
     let pcm = read_wav_pcm_16k(audio_path)?;
     if pcm.is_empty() {
         return Err("录音文件为空".to_string());
@@ -86,6 +103,7 @@ where
     let (mut write, mut read) = ws.split();
     let reader = async move {
         let mut latest_text = String::new();
+        let mut ttft_ms = None;
         while let Some(message) = read.next().await {
             let message = message.map_err(|error| error.to_string())?;
             let Message::Binary(data) = message else {
@@ -94,6 +112,9 @@ where
             let response = parse_server_frame(data.as_ref())?;
             if let Some(text) = response.text {
                 if !text.trim().is_empty() {
+                    if ttft_ms.is_none() {
+                        ttft_ms = Some(started_at.elapsed().as_millis());
+                    }
                     latest_text = text;
                 }
             }
@@ -101,7 +122,7 @@ where
                 break;
             }
         }
-        Ok::<String, String>(latest_text)
+        Ok::<(String, Option<u128>), String>((latest_text, ttft_ms))
     };
 
     let writer = async move {
@@ -151,9 +172,15 @@ where
         Ok::<(), String>(())
     };
 
-    let (_, latest_text) = try_join(writer, reader).await?;
+    let (_, (latest_text, ttft_ms)) = try_join(writer, reader).await?;
 
-    Ok((latest_text, log_id, request_id))
+    Ok(TimedTranscriptionResult {
+        text: latest_text,
+        log_id,
+        request_id,
+        ttft_ms,
+        total_ms: started_at.elapsed().as_millis(),
+    })
 }
 
 pub async fn transcribe_audio_stream<F, G>(
@@ -167,6 +194,7 @@ where
     F: FnMut(String, Vec<DoubaoUtterance>) + Send + 'static,
     G: FnMut(usize, u64) + Send + 'static,
 {
+    let started_at = Instant::now();
     let request_id = Uuid::new_v4().to_string();
     let request = build_doubao_request(&settings, &request_id)?;
     let (ws, response) = connect_async(request).await.map_err(|error| {
@@ -189,6 +217,7 @@ where
 
     let reader = async move {
         let mut latest_text = String::new();
+        let mut ttft_ms = None;
         while let Some(message) = read.next().await {
             let message = message.map_err(|error| error.to_string())?;
             let Message::Binary(data) = message else {
@@ -197,6 +226,9 @@ where
             let response = parse_server_frame(data.as_ref())?;
             if let Some(text) = response.text {
                 if !text.trim().is_empty() {
+                    if ttft_ms.is_none() {
+                        ttft_ms = Some(started_at.elapsed().as_millis());
+                    }
                     latest_text = text.clone();
                     on_text(text, response.utterances);
                 }
@@ -205,7 +237,7 @@ where
                 break;
             }
         }
-        Ok::<String, String>(latest_text)
+        Ok::<(String, Option<u128>), String>((latest_text, ttft_ms))
     };
 
     let writer = async move {
@@ -250,11 +282,13 @@ where
         Ok::<(), String>(())
     };
 
-    let (_, text) = try_join(writer, reader).await?;
+    let (_, (text, ttft_ms)) = try_join(writer, reader).await?;
     Ok(RealtimeTranscriptionResult {
         text,
         log_id,
         request_id,
+        ttft_ms,
+        total_ms: started_at.elapsed().as_millis(),
     })
 }
 
@@ -321,10 +355,11 @@ pub async fn optimize_text_streaming<F>(
     prompts: &PromptSettings,
     raw_asr_text: &str,
     mut on_progress: F,
-) -> Result<String, String>
+) -> Result<TimedTextResult, String>
 where
     F: FnMut(String) + Send,
 {
+    let started_at = Instant::now();
     let provider = active_text_provider(settings)?;
 
     let mut client_builder = reqwest::Client::builder();
@@ -367,6 +402,7 @@ where
 
     let mut output = String::new();
     let mut pending = String::new();
+    let mut ttft_ms = None;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| error.to_string())?;
@@ -380,12 +416,19 @@ where
             }
             let data = line.trim_start_matches("data:").trim();
             if data == "[DONE]" {
-                return Ok(output.trim().to_string());
+                return Ok(TimedTextResult {
+                    text: output.trim().to_string(),
+                    ttft_ms,
+                    total_ms: started_at.elapsed().as_millis(),
+                });
             }
             let parsed: OpenRouterStreamResponse =
                 serde_json::from_str(data).map_err(|error| error.to_string())?;
             for choice in parsed.choices {
                 if let Some(content) = choice.delta.content {
+                    if ttft_ms.is_none() && !content.trim().is_empty() {
+                        ttft_ms = Some(started_at.elapsed().as_millis());
+                    }
                     output.push_str(&content);
                     on_progress(output.clone());
                 }
@@ -397,7 +440,11 @@ where
     if output.is_empty() {
         Err(format!("{} 没有返回可用文本", provider.name))
     } else {
-        Ok(output)
+        Ok(TimedTextResult {
+            text: output,
+            ttft_ms,
+            total_ms: started_at.elapsed().as_millis(),
+        })
     }
 }
 

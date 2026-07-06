@@ -245,7 +245,6 @@ function getStatusText(state: OverlayState) {
     if (state.status_kind === "saved") return "已保存";
     return formatDuration(state.elapsed_ms);
   }
-  if (state.phase === "saving") return "保存中";
   if (typeof state.progress_current !== "number" || typeof state.progress_total !== "number" || state.progress_total <= 0) {
     if (state.phase === "transcribing") return "转写中";
     if (state.phase === "optimizing") return "优化中";

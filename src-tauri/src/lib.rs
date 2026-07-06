@@ -79,6 +79,14 @@ pub fn run() {
             if let Some(overlay) = app.get_webview_window("overlay") {
                 position_overlay(&overlay, false)?;
             }
+            if should_start_silent_to_tray() {
+                if let Some(main) = app.get_webview_window("main") {
+                    main.hide()?;
+                }
+                storage::append_log(&handle, "应用已静默启动到托盘。");
+            } else if let Err(error) = show_main_window(&handle) {
+                storage::append_log(&handle, &format!("启动时显示主窗口失败：{error}"));
+            }
 
             Ok(())
         })
@@ -100,7 +108,7 @@ pub mod services;
 mod shortcut;
 mod storage;
 
-use std::{path::PathBuf, sync::Mutex};
+use std::{path::PathBuf, sync::Mutex, time::Instant};
 
 use arboard::Clipboard;
 use base64::{engine::general_purpose, Engine as _};
@@ -148,9 +156,14 @@ enum FastAsrOutcome {
 }
 
 const FAST_ASR_FINAL_WAIT_MS: u64 = 3000;
+const SILENT_STARTUP_ARG: &str = "--silent-startup";
 const OVERLAY_WINDOW_WIDTH: f64 = 520.0;
 const OVERLAY_WINDOW_HEIGHT: f64 = 132.0;
 const OVERLAY_BOTTOM_MARGIN: f64 = 72.0;
+
+fn should_start_silent_to_tray() -> bool {
+    std::env::args_os().any(|arg| arg.to_string_lossy() == SILENT_STARTUP_ARG)
+}
 
 fn create_tray(app: &App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open-main", "打开主界面", true, None::<&str>)?;
@@ -266,7 +279,7 @@ fn sync_launch_at_startup(app: &AppHandle, enabled: bool) -> Result<(), String> 
     if enabled {
         let exe_path =
             std::env::current_exe().map_err(|error| format!("无法读取当前程序路径：{error}"))?;
-        let command = format!("\"{}\"", exe_path.display());
+        let command = format!("\"{}\" {}", exe_path.display(), SILENT_STARTUP_ARG);
         run_key
             .set_value(VALUE_NAME, &command)
             .map_err(|error| format!("无法写入开机自启动设置：{error}"))?;
@@ -374,8 +387,8 @@ async fn test_openrouter(settings: AppSettings) -> Result<String, String> {
 #[tauri::command]
 async fn debug_transcribe_file(app: AppHandle, path: String) -> Result<String, String> {
     let settings = storage::get_settings(&app)?;
-    let (text, _, _) = services::transcribe_audio(&settings, &PathBuf::from(path)).await?;
-    Ok(text)
+    let result = services::transcribe_audio(&settings, &PathBuf::from(path)).await?;
+    Ok(result.text)
 }
 
 #[tauri::command]
@@ -575,8 +588,8 @@ async fn stop_recording(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SpeechRecord, String> {
-    set_session_status(&app, &state, "saving")?;
-    show_overlay(&app, "saving", "正在保存录音", 0)?;
+    set_session_status(&app, &state, "transcribing")?;
+    show_overlay(&app, "transcribing", "文字转写中", 0)?;
 
     let settings = storage::get_settings(&app)?;
     let fast_asr_upload_started = if settings.fast_asr_finalize {
@@ -615,6 +628,7 @@ async fn stop_recording(
         raw_asr_text: String::new(),
         final_text: String::new(),
         audio_path: None,
+        audio_status: "pending".into(),
         duration_ms: captured_duration_ms,
         audio_expires_at: Some(
             (now + Duration::days(settings.recording_retention_days)).to_rfc3339(),
@@ -633,6 +647,7 @@ async fn stop_recording(
         .map_err(|error| error.to_string())?;
 
     let save_audio_path = audio_path.clone();
+    let save_started_at = Instant::now();
     let save_task = tauri::async_runtime::spawn_blocking(move || -> Result<u64, String> {
         let audio = recorder.stop()?;
         let duration_ms = audio.duration_ms();
@@ -640,11 +655,15 @@ async fn stop_recording(
         Ok(duration_ms)
     });
 
-    set_session_status(&app, &state, "transcribing")?;
-    show_overlay(&app, "transcribing", "文字转写中", 0)?;
-    record =
-        await_audio_save_for_transcription(&app, record, active_session_id, &audio_path, save_task)
-            .await;
+    record = await_audio_save_for_transcription(
+        &app,
+        record,
+        active_session_id,
+        &audio_path,
+        save_started_at,
+        save_task,
+    )
+    .await;
     if record.audio_path.is_none() {
         reset_recording_state(&app, &state)?;
         finish_overlay_after_record(app.clone(), &record);
@@ -670,6 +689,11 @@ async fn stop_recording(
     }
 
     if needs_full_audio_transcription {
+        if record.audio_path.is_none() {
+            reset_recording_state(&app, &state)?;
+            finish_overlay_after_record(app.clone(), &record);
+            return Ok(record);
+        }
         record = match transcribe_record(app.clone(), record).await {
             Ok(record) => record,
             Err(record) => {
@@ -694,8 +718,10 @@ async fn await_audio_save_for_transcription(
     record: SpeechRecord,
     active_session_id: Option<String>,
     audio_path: &PathBuf,
+    save_started_at: Instant,
     save_task: tauri::async_runtime::JoinHandle<Result<u64, String>>,
 ) -> SpeechRecord {
+    let save_elapsed_ms = || save_started_at.elapsed().as_millis();
     match save_task.await {
         Ok(Ok(duration_ms)) => match apply_audio_save_success(
             app,
@@ -703,12 +729,13 @@ async fn await_audio_save_for_transcription(
             active_session_id,
             audio_path,
             duration_ms,
+            save_elapsed_ms(),
         ) {
             Ok(record) => record,
-            Err(error) => apply_audio_save_failure(app, record, error),
+            Err(error) => apply_audio_save_failure(app, record, error, save_elapsed_ms()),
         },
-        Ok(Err(error)) => apply_audio_save_failure(app, record, error),
-        Err(error) => apply_audio_save_failure(app, record, error.to_string()),
+        Ok(Err(error)) => apply_audio_save_failure(app, record, error, save_elapsed_ms()),
+        Err(error) => apply_audio_save_failure(app, record, error.to_string(), save_elapsed_ms()),
     }
 }
 
@@ -718,19 +745,22 @@ fn apply_audio_save_success(
     active_session_id: Option<String>,
     audio_path: &PathBuf,
     duration_ms: u64,
+    save_elapsed_ms: u128,
 ) -> Result<SpeechRecord, String> {
     storage::append_log(
         app,
         &format!(
-            "录音已保存：record_id={}，时长={}，文件={}",
+            "录音已保存：record_id={}，音频时长={}，保存耗时={}，文件={}",
             record_id,
             format_duration_for_log(duration_ms),
+            format_elapsed_for_log(save_elapsed_ms),
             audio_path.display()
         ),
     );
 
     let mut record = storage::find_record(app, record_id)?;
     record.audio_path = Some(path_to_string(audio_path));
+    record.audio_status = "saved".into();
     record.duration_ms = Some(duration_ms);
     record.updated_at = Utc::now().to_rfc3339();
     let record = storage::upsert_record(app, record)?;
@@ -762,14 +792,20 @@ fn apply_audio_save_failure(
     app: &AppHandle,
     mut record: SpeechRecord,
     error: String,
+    save_elapsed_ms: u128,
 ) -> SpeechRecord {
     storage::append_log(
         app,
-        &format!("录音保存失败：record_id={}，错误={}。", record.id, error),
+        &format!(
+            "录音保存失败：record_id={}，保存耗时={}，错误={}。",
+            record.id,
+            format_elapsed_for_log(save_elapsed_ms),
+            error
+        ),
     );
     record.audio_path = None;
-    record.duration_ms = None;
-    record.asr_status = "failed".into();
+    record.audio_status = "save_failed".into();
+    record.asr_status = "blocked".into();
     record.optimize_status = "blocked".into();
     record.error_message = Some(format!("录音保存失败：{error}"));
     record.updated_at = Utc::now().to_rfc3339();
@@ -914,6 +950,7 @@ async fn apply_fast_asr_result(
         update_overlay_progress(&app, "transcribing", sent_ms.min(total_ms), total_ms);
     }
 
+    let final_wait_started_at = Instant::now();
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(FAST_ASR_FINAL_WAIT_MS),
         completion,
@@ -925,8 +962,10 @@ async fn apply_fast_asr_result(
             storage::append_log(
                 &app,
                 &format!(
-                    "快速转写最终结果失败：record_id={}，改用完整音频转写。错误={}。",
-                    record.id, error
+                    "快速转写最终结果失败：record_id={}，等待耗时={}，改用完整音频转写。错误={}。",
+                    record.id,
+                    format_elapsed_for_log(final_wait_started_at.elapsed().as_millis()),
+                    error
                 ),
             );
             return FastAsrOutcome::Fallback(record);
@@ -935,8 +974,9 @@ async fn apply_fast_asr_result(
             storage::append_log(
                 &app,
                 &format!(
-                    "快速转写任务提前结束：record_id={}，改用完整音频转写。",
-                    record.id
+                    "快速转写任务提前结束：record_id={}，等待耗时={}，改用完整音频转写。",
+                    record.id,
+                    format_elapsed_for_log(final_wait_started_at.elapsed().as_millis())
                 ),
             );
             return FastAsrOutcome::Fallback(record);
@@ -945,8 +985,9 @@ async fn apply_fast_asr_result(
             storage::append_log(
                 &app,
                 &format!(
-                    "快速转写等待超时：record_id={}，改用完整音频转写。",
-                    record.id
+                    "快速转写等待超时：record_id={}，等待耗时={}，改用完整音频转写。",
+                    record.id,
+                    format_elapsed_for_log(final_wait_started_at.elapsed().as_millis())
                 ),
             );
             return FastAsrOutcome::Fallback(record);
@@ -958,7 +999,15 @@ async fn apply_fast_asr_result(
     }
 
     let text = result.text.trim().to_string();
-    complete_fast_asr_record(app, record, text, result.log_id, Some(result.request_id))
+    complete_fast_asr_record(
+        app,
+        record,
+        text,
+        result.log_id,
+        Some(result.request_id),
+        result.ttft_ms,
+        result.total_ms,
+    )
 }
 
 fn complete_fast_asr_record(
@@ -967,6 +1016,8 @@ fn complete_fast_asr_record(
     text: String,
     log_id: Option<String>,
     request_id: Option<String>,
+    ttft_ms: Option<u128>,
+    total_ms: u128,
 ) -> FastAsrOutcome {
     if let Some(total_ms) = record.duration_ms {
         update_overlay_progress(&app, "transcribing", total_ms, total_ms);
@@ -986,8 +1037,10 @@ fn complete_fast_asr_record(
         storage::append_log(
             &app,
             &format!(
-                "快速转写完成：record_id={}，结果为空，按 no_speech 保存。",
-                record.id
+                "快速转写完成：record_id={}，结果为空，按 no_speech 保存。TTFT={}，ASR耗时={}。",
+                record.id,
+                format_optional_elapsed_for_log(ttft_ms),
+                format_elapsed_for_log(total_ms)
             ),
         );
         return FastAsrOutcome::NoSpeech(record);
@@ -1004,8 +1057,11 @@ fn complete_fast_asr_record(
     storage::append_log(
         &app,
         &format!(
-            "快速转写完成：record_id={}，原始文本 {} 字。",
-            record.id, asr_chars
+            "快速转写完成：record_id={}，原始文本 {} 字，TTFT={}，ASR耗时={}。",
+            record.id,
+            asr_chars,
+            format_optional_elapsed_for_log(ttft_ms),
+            format_elapsed_for_log(total_ms)
         ),
     );
     FastAsrOutcome::Completed(record)
@@ -1053,6 +1109,7 @@ async fn import_audio_file(app: AppHandle, path: String) -> Result<SpeechRecord,
         raw_asr_text: String::new(),
         final_text: String::new(),
         audio_path: Some(path_to_string(&audio_path)),
+        audio_status: "saved".into(),
         duration_ms: Some(duration_ms),
         audio_expires_at: Some(
             (now + Duration::days(settings.recording_retention_days)).to_rfc3339(),
@@ -1111,6 +1168,9 @@ async fn transcribe_record(
 ) -> Result<SpeechRecord, SpeechRecord> {
     let settings = storage::get_settings(&app).unwrap_or_default();
     let Some(audio_path) = record.audio_path.clone() else {
+        if record.audio_status.trim().is_empty() {
+            record.audio_status = "missing".into();
+        }
         record.asr_status = "failed".into();
         record.error_message = Some("这条记录没有可用录音文件".into());
         storage::append_log(
@@ -1136,9 +1196,10 @@ async fn transcribe_record(
     );
 
     let app_for_progress = app.clone();
+    let asr_started_at = Instant::now();
     match services::transcribe_audio_with_progress(
         &settings,
-        &PathBuf::from(audio_path),
+        &PathBuf::from(&audio_path),
         move |current_ms, total_ms| {
             let progress_cap = (total_ms.saturating_mul(96) / 100).max(1);
             update_overlay_progress(
@@ -1151,26 +1212,29 @@ async fn transcribe_record(
     )
     .await
     {
-        Ok((text, log_id, request_id)) => {
+        Ok(result) => {
             if let Some(total_ms) = record.duration_ms {
                 update_overlay_progress(&app, "transcribing", total_ms, total_ms);
             }
+            let text = result.text;
             if text.trim().is_empty() {
                 record.raw_asr_text = String::new();
                 record.final_text = "没有录音".into();
                 record.asr_status = "no_speech".into();
                 record.optimize_status = "blocked".into();
                 record.error_message = None;
-                record.doubao_log_id = log_id;
-                record.doubao_request_id = Some(request_id);
+                record.doubao_log_id = result.log_id;
+                record.doubao_request_id = Some(result.request_id);
                 record.updated_at = Utc::now().to_rfc3339();
                 let _ = storage::upsert_record(&app, record.clone());
                 let _ = app.emit("record-updated", &record);
                 storage::append_log(
                     &app,
                     &format!(
-                        "豆包 ASR 完成：record_id={}，结果为空，按 no_speech 保存。request_id={}，log_id={}。",
+                        "豆包 ASR 完成：record_id={}，结果为空，按 no_speech 保存。TTFT={}，ASR耗时={}，request_id={}，log_id={}。",
                         record.id,
+                        format_optional_elapsed_for_log(result.ttft_ms),
+                        format_elapsed_for_log(result.total_ms),
                         record.doubao_request_id.clone().unwrap_or_else(|| "无".into()),
                         record.doubao_log_id.clone().unwrap_or_else(|| "无".into())
                     ),
@@ -1182,14 +1246,16 @@ async fn transcribe_record(
             record.asr_status = "completed".into();
             record.optimize_status = "pending".into();
             record.error_message = None;
-            record.doubao_log_id = log_id;
-            record.doubao_request_id = Some(request_id);
+            record.doubao_log_id = result.log_id;
+            record.doubao_request_id = Some(result.request_id);
             storage::append_log(
                 &app,
                 &format!(
-                    "豆包 ASR 完成：record_id={}，原始文本 {} 字，request_id={}，log_id={}。",
+                    "豆包 ASR 完成：record_id={}，原始文本 {} 字，TTFT={}，ASR耗时={}，request_id={}，log_id={}。",
                     record.id,
                     asr_chars,
+                    format_optional_elapsed_for_log(result.ttft_ms),
+                    format_elapsed_for_log(result.total_ms),
                     record
                         .doubao_request_id
                         .clone()
@@ -1205,8 +1271,10 @@ async fn transcribe_record(
             storage::append_log(
                 &app,
                 &format!(
-                    "豆包 ASR 失败：record_id={}，录音已保留，错误={}。",
-                    record.id, error
+                    "豆包 ASR 失败：record_id={}，已等待={}，录音已保留，错误={}。",
+                    record.id,
+                    format_elapsed_for_log(asr_started_at.elapsed().as_millis()),
+                    error
                 ),
             );
             record.updated_at = Utc::now().to_rfc3339();
@@ -1246,6 +1314,7 @@ async fn optimize_record(app: AppHandle, mut record: SpeechRecord) -> SpeechReco
             ),
         );
         let app_for_progress = app.clone();
+        let optimize_started_at = Instant::now();
         match services::optimize_text_streaming(
             &settings,
             &prompts,
@@ -1264,8 +1333,9 @@ async fn optimize_record(app: AppHandle, mut record: SpeechRecord) -> SpeechReco
         )
         .await
         {
-            Ok(text) => {
+            Ok(result) => {
                 update_overlay_progress(&app, "optimizing", progress_total, progress_total);
+                let text = result.text;
                 let output_chars = count_text_chars(&text);
                 record.final_text = text;
                 record.optimize_status = "completed".into();
@@ -1286,9 +1356,11 @@ async fn optimize_record(app: AppHandle, mut record: SpeechRecord) -> SpeechReco
                 storage::append_log(
                     &app,
                     &format!(
-                        "文本优化完成：record_id={}，输出 {} 字，已复制={}，已自动粘贴={}。",
+                        "文本优化完成：record_id={}，输出 {} 字，TTFT={}，优化耗时={}，已复制={}，已自动粘贴={}。",
                         record.id,
                         output_chars,
+                        format_optional_elapsed_for_log(result.ttft_ms),
+                        format_elapsed_for_log(result.total_ms),
                         if copied { "是" } else { "否" },
                         if pasted { "是" } else { "否" }
                     ),
@@ -1300,8 +1372,10 @@ async fn optimize_record(app: AppHandle, mut record: SpeechRecord) -> SpeechReco
                 storage::append_log(
                     &app,
                     &format!(
-                        "文本优化失败：record_id={}，原始 ASR 已保存，错误={}。",
-                        record.id, error
+                        "文本优化失败：record_id={}，已等待={}，原始 ASR 已保存，错误={}。",
+                        record.id,
+                        format_elapsed_for_log(optimize_started_at.elapsed().as_millis()),
+                        error
                     ),
                 );
             }
@@ -1974,6 +2048,19 @@ fn format_duration_for_log(ms: u64) -> String {
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
     format!("{minutes:02}:{seconds:02}")
+}
+
+fn format_elapsed_for_log(ms: u128) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.2}s", ms as f64 / 1000.0)
+    }
+}
+
+fn format_optional_elapsed_for_log(ms: Option<u128>) -> String {
+    ms.map(format_elapsed_for_log)
+        .unwrap_or_else(|| "无首个文本".into())
 }
 
 fn active_text_provider_label(settings: &AppSettings) -> String {
