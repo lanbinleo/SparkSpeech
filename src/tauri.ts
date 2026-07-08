@@ -6,6 +6,7 @@ export type AppSettings = {
   recording_retention_days: number;
   recording_segment_seconds: number;
   microphone_name: string;
+  overlay_audio_sensitivity: string;
   theme: string;
   save_logs: boolean;
   launch_at_startup: boolean;
@@ -148,6 +149,7 @@ const fallback: BootstrapData = {
     recording_retention_days: 7,
     recording_segment_seconds: 10,
     microphone_name: "",
+    overlay_audio_sensitivity: "standard",
     theme: "system",
     save_logs: true,
     launch_at_startup: false,

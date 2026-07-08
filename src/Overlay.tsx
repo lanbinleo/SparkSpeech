@@ -3,7 +3,14 @@ import type { CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Check, Mic, RotateCw, WifiOff } from "lucide-react";
 import { call } from "./tauri";
-import type { OverlayState } from "./tauri";
+import type { AppSettings, BootstrapData, OverlayState } from "./tauri";
+
+const audioSensitivityThresholds: Record<string, number> = {
+  low: 0.12,
+  standard: 0.08,
+  high: 0.045,
+  very_high: 0.02,
+};
 
 export function Overlay() {
   const [state, setState] = useState<OverlayState>({
@@ -19,6 +26,7 @@ export function Overlay() {
     progress_total: null,
     reconnect_available: false,
   });
+  const [audioThreshold, setAudioThreshold] = useState(audioSensitivityThresholds.standard);
   const [speechHoldUntil, setSpeechHoldUntil] = useState(0);
   const [now, setNow] = useState(Date.now());
   const animatedProgressCurrent = useAnimatedProgress(state);
@@ -29,23 +37,30 @@ export function Overlay() {
     call<OverlayState>("get_overlay_state")
       .then(setState)
       .catch(() => undefined);
+    call<BootstrapData>("get_bootstrap")
+      .then((data) => setAudioThreshold(getAudioThreshold(data.settings)))
+      .catch(() => undefined);
     const unlisten = listen<OverlayState>("overlay-state", (event) => {
       setState(event.payload);
+    });
+    const unlistenSettings = listen<AppSettings>("settings-updated", (event) => {
+      setAudioThreshold(getAudioThreshold(event.payload));
     });
 
     return () => {
       document.documentElement.classList.remove("overlay-html");
       document.body.classList.remove("overlay-body");
       unlisten.then((dispose) => dispose());
+      unlistenSettings.then((dispose) => dispose());
     };
   }, []);
 
   useEffect(() => {
     if (state.phase !== "recording") return;
-    if ((state.input_level ?? 0) > 0.08) {
+    if ((state.input_level ?? 0) > audioThreshold) {
       setSpeechHoldUntil(Date.now() + 1400);
     }
-  }, [state.input_level, state.phase]);
+  }, [audioThreshold, state.input_level, state.phase]);
 
   useEffect(() => {
     if (state.phase !== "recording") return;
@@ -55,7 +70,7 @@ export function Overlay() {
 
   if (!state.visible) return <div className="overlay-root" />;
   const level = Math.max(0, Math.min(1, state.input_level ?? 0));
-  const speaking = level > 0.08 || now < speechHoldUntil;
+  const speaking = level > audioThreshold || now < speechHoldUntil;
   const waveStyle = { "--level": speaking ? "1" : "0" } as CSSProperties;
   const [attentionTitle, ...attentionDetail] = state.label.split("：");
   const displayState =
@@ -126,6 +141,10 @@ export function Overlay() {
       </div>
     </div>
   );
+}
+
+function getAudioThreshold(settings: AppSettings) {
+  return audioSensitivityThresholds[settings.overlay_audio_sensitivity] ?? audioSensitivityThresholds.standard;
 }
 
 type ProgressSnapshot = {
