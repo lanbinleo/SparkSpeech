@@ -10,6 +10,7 @@ import {
   Home,
   Headphones,
   Keyboard,
+  Minus,
   Mic,
   Monitor,
   Moon,
@@ -19,6 +20,7 @@ import {
   Save,
   Settings,
   SlidersHorizontal,
+  Square,
   Sun,
   TestTube2,
   Trash2,
@@ -29,6 +31,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { call } from "./tauri";
@@ -74,6 +77,12 @@ const audioStatusLabel: Record<string, string> = {
 };
 
 const pageSize = 60;
+const audioSensitivityOptions = [
+  { value: "low", label: "低", description: "环境声较多时使用" },
+  { value: "standard", label: "标准", description: "当前默认表现" },
+  { value: "high", label: "高", description: "麦克风偏小时使用" },
+  { value: "very_high", label: "很高", description: "轻声也显示动画" },
+];
 
 export function App() {
   const [activeTab, setActiveTab] = useState<Tab>("home");
@@ -366,6 +375,7 @@ export function App() {
 
   return (
     <div className={`app-shell${draggingFile ? " dragging-file" : ""}`}>
+      <AppTitlebar />
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-mark" src="/logo.svg" alt="" />
@@ -654,6 +664,51 @@ function ConfirmDeleteModal({
         </div>
       </section>
     </div>
+  );
+}
+
+function AppTitlebar() {
+  const appWindow = getCurrentWindow();
+
+  function startDrag(event: React.MouseEvent<HTMLElement>) {
+    if (event.button !== 0) return;
+    appWindow.startDragging().catch(() => undefined);
+  }
+
+  function toggleMaximize() {
+    appWindow.toggleMaximize().catch(() => undefined);
+  }
+
+  function minimizeWindow() {
+    appWindow.minimize().catch(() => undefined);
+  }
+
+  function closeWindow() {
+    appWindow.close().catch(() => undefined);
+  }
+
+  return (
+    <header className="window-titlebar" onMouseDown={startDrag} onDoubleClick={toggleMaximize}>
+      <div className="window-title">
+        <img src="/logo.svg" alt="" />
+        <span>SparkSpeech</span>
+      </div>
+      <div
+        className="window-controls"
+        onMouseDown={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+      >
+        <button type="button" aria-label="最小化" title="最小化" onClick={minimizeWindow}>
+          <Minus size={15} />
+        </button>
+        <button type="button" aria-label="最大化或还原" title="最大化或还原" onClick={toggleMaximize}>
+          <Square size={13} />
+        </button>
+        <button className="close" type="button" aria-label="关闭" title="关闭" onClick={closeWindow}>
+          <X size={16} />
+        </button>
+      </div>
+    </header>
   );
 }
 
@@ -1464,6 +1519,25 @@ function AppSettingsView({
               {capturingShortcut ? "请按下一个键" : shortcutLabel(settings.global_shortcut)}
             </button>
           </label>
+          <div className="sensitivity-field">
+            <div>
+              <span>录音动画灵敏度</span>
+              <small>只影响底部录音状态条的音量动画。</small>
+            </div>
+            <div className="sensitivity-options" role="group" aria-label="录音动画灵敏度">
+              {audioSensitivityOptions.map((option) => (
+                <button
+                  className={settings.overlay_audio_sensitivity === option.value ? "active" : ""}
+                  type="button"
+                  title={option.description}
+                  key={option.value}
+                  onClick={() => onChange({ ...settings, overlay_audio_sensitivity: option.value })}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
           <TextField
             label="录音保留天数"
             value={String(settings.recording_retention_days)}

@@ -119,8 +119,68 @@ button:disabled {
   position: relative;
   display: grid;
   grid-template-columns: 230px minmax(0, 1fr);
+  grid-template-rows: 38px minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
+}
+
+.window-titlebar {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 38px;
+  border-bottom: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--surface) 76%, var(--canvas));
+  color: var(--ink);
+  user-select: none;
+}
+
+.window-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.window-title img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.window-controls {
+  display: flex;
+  align-self: stretch;
+}
+
+.window-controls button {
+  display: grid;
+  width: 46px;
+  height: 100%;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.window-controls button:hover {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink);
+}
+
+.window-controls button:active {
+  background: color-mix(in srgb, var(--ink) 13%, transparent);
+}
+
+.window-controls button.close:hover {
+  background: #c42b1c;
+  color: #ffffff;
 }
 
 .drop-overlay {
@@ -152,13 +212,14 @@ button:disabled {
 }
 
 .sidebar {
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   gap: 24px;
   padding: 22px 18px;
   border-right: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--surface) 58%, transparent);
-  height: 100vh;
+  height: 100%;
   overflow: hidden;
 }
 
@@ -247,9 +308,10 @@ button:disabled {
 }
 
 .workspace {
+  grid-row: 2;
   padding: 28px 42px 54px;
   overflow: auto;
-  height: 100vh;
+  height: 100%;
   min-width: 0;
   scrollbar-color: var(--scrollbar) transparent;
   scrollbar-width: thin;
@@ -580,14 +642,51 @@ textarea::-webkit-scrollbar-thumb:hover {
 }
 
 .text-field,
-.toggle-field {
+.toggle-field,
+.sensitivity-field {
   display: grid;
   gap: 7px;
 }
 
-.text-field span {
+.text-field span,
+.sensitivity-field span {
   color: var(--muted);
   font-size: 13px;
+}
+
+.sensitivity-field {
+  grid-column: 1 / -1;
+}
+
+.sensitivity-field small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sensitivity-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sensitivity-options button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.sensitivity-options button.active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface));
+  color: var(--primary);
 }
 
 .text-field input,

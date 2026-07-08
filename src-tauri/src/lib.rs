@@ -231,6 +231,7 @@ fn save_settings(
 ) -> Result<AppSettings, String> {
     sync_launch_at_startup(&app, settings.launch_at_startup)?;
     storage::save_settings(&app, &settings)?;
+    let _ = app.emit("settings-updated", settings.clone());
     storage::append_log(
         &app,
         &format!(
